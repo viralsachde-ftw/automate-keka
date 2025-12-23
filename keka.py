@@ -19,19 +19,28 @@ except ImportError:
     redis = None
     print("Warning: 'redis' package not found. Install it with 'pip install redis' to use Redis storage.")
 
-# Setup logging
+# Constants (with environment variable support)
+IST = pytz.timezone(os.environ.get('KEKA_TIMEZONE', 'Asia/Kolkata'))
+TOKEN_FILE = os.environ.get('KEKA_TOKEN_FILE', 'keka_tokens.json')
+REDIS_KEY = os.environ.get('KEKA_REDIS_KEY', 'keka_tokens')
+LOG_LEVEL = os.environ.get('LOG_LEVEL', 'INFO').upper()
+TOKEN_EXPIRY_BUFFER = int(os.environ.get('TOKEN_EXPIRY_BUFFER', '300'))
+
+# Configure logging (after LOG_LEVEL is defined)
+log_level_map = {
+    'DEBUG': logging.DEBUG,
+    'INFO': logging.INFO,
+    'WARNING': logging.WARNING,
+    'ERROR': logging.ERROR,
+    'CRITICAL': logging.CRITICAL
+}
 logging.basicConfig(
-    level=logging.INFO,
+    level=log_level_map.get(LOG_LEVEL, logging.INFO),
     format='%(asctime)s - %(levelname)s - %(message)s',
     handlers=[
         logging.StreamHandler()
     ]
 )
-
-# Constants
-IST = pytz.timezone('Asia/Kolkata')
-TOKEN_FILE = 'keka_tokens.json'
-REDIS_KEY = 'keka_tokens'
 
 # Redis connection
 kv = None
@@ -51,10 +60,10 @@ if redis_url:
 
 class KekaAttendance:
     def __init__(self):
-        self.base_url = "https://alchemy.keka.com"
-        self.auth_url = "https://app.keka.com"
-        self.client_id = "987cc971-fc22-4454-99f9-16c078fa7ff6"
-        self.redirect_uri = "https://alchemy.keka.com"
+        self.base_url = os.environ.get('KEKA_BASE_URL', 'https://alchemy.keka.com')
+        self.auth_url = os.environ.get('KEKA_AUTH_URL', 'https://app.keka.com')
+        self.client_id = os.environ.get('KEKA_CLIENT_ID', '987cc971-fc22-4454-99f9-16c078fa7ff6')
+        self.redirect_uri = os.environ.get('KEKA_REDIRECT_URI', 'https://alchemy.keka.com')
         self.access_token = None
         self.refresh_token = None
         self.token_expiry = None
@@ -139,7 +148,7 @@ class KekaAttendance:
         """Check if token is expired or expires soon"""
         if not self.token_expiry:
             return True
-        return time.time() > (self.token_expiry - 300)
+        return time.time() > (self.token_expiry - TOKEN_EXPIRY_BUFFER)
     
     def refresh_access_token(self):
         """Refresh access token using refresh token"""
@@ -228,23 +237,38 @@ class KekaAttendance:
             return True
         return False
     
-    def clock_action(self, action_type="in"):
-        """Perform clock in or clock out"""
+    def clock_action(self, action_type="in", clock_type="web"):
+        """Perform clock in or clock out
+        
+        Args:
+            action_type: "in" or "out"
+            clock_type: "web" (WFO, manualClockinType=1) or "remote" (WFH, manualClockinType=3)
+        """
         if self.is_token_expired():
             logging.info("Token expired, refreshing...")
             if not self.refresh_access_token():
                 logging.error("Failed to refresh token. Please re-authenticate.")
                 return False
         
-        url = f"{self.base_url}/k/attendance/api/mytime/attendance/remoteclockin"
+        # Use web clock-in endpoint (for WFO) or remote clock-in (for WFH)
+        clock_type = clock_type.lower()
+        if clock_type == "web" or clock_type == "wfo":
+            endpoint = "webclockin"
+            manual_clockin_type = 1
+        else:  # remote or wfh
+            endpoint = "remoteclockin"
+            manual_clockin_type = 3
+        
+        url = f"{self.base_url}/k/attendance/api/mytime/attendance/{endpoint}"
         
         headers = {
             'Accept': 'application/json, text/plain, */*',
             'Authorization': f'Bearer {self.access_token}',
-            'Content-Type': 'application/json; charset=UTF-8',
+            'Content-Type': 'application/json; charset=utf-8',
             'Origin': self.base_url,
             'Referer': f'{self.base_url}/',
-            'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36'
+            'X-Requested-With': 'XMLHttpRequest',
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:143.0) Gecko/20100101 Firefox/143.0'
         }
         
         original_punch_status = 0 if action_type.lower() == "in" else 1
@@ -254,15 +278,17 @@ class KekaAttendance:
             "timestamp": datetime.now(timezone.utc).isoformat().replace('+00:00', 'Z'),
             "attendanceLogSource": 1,
             "locationAddress": None,
-            "manualClockinType": 3,
+            "manualClockinType": manual_clockin_type,
             "note": note,
             "originalPunchStatus": original_punch_status
         }
         
         try:
+            clock_type_label = "WFO (Web)" if manual_clockin_type == 1 else "WFH (Remote)"
+            logging.info(f"Attempting {clock_type_label} clock {action_type.upper()}...")
             response = requests.post(url, headers=headers, json=payload)
             response.raise_for_status()
-            logging.info(f"Clock {action_type.upper()} successful at {datetime.now(IST).strftime('%Y-%m-%d %H:%M:%S %Z')}")
+            logging.info(f"Clock {action_type.upper()} successful ({clock_type_label}) at {datetime.now(IST).strftime('%Y-%m-%d %H:%M:%S %Z')}")
             return True
         except requests.exceptions.RequestException as e:
             logging.error(f"Clock {action_type.upper()} failed: {e}")
@@ -270,11 +296,17 @@ class KekaAttendance:
                 logging.error(f"Response: {e.response.text}")
             return False
     
-    def clock_in(self):
-        return self.clock_action("in")
+    def clock_in(self, clock_type=None):
+        """Clock in with optional clock type (web/WFO or remote/WFH)"""
+        if clock_type is None:
+            clock_type = os.environ.get('KEKA_CLOCK_TYPE', 'web').lower()
+        return self.clock_action("in", clock_type)
     
-    def clock_out(self):
-        return self.clock_action("out")
+    def clock_out(self, clock_type=None):
+        """Clock out with optional clock type (web/WFO or remote/WFH)"""
+        if clock_type is None:
+            clock_type = os.environ.get('KEKA_CLOCK_TYPE', 'web').lower()
+        return self.clock_action("out", clock_type)
 
 # --- Scheduler / Run Logic ---
 

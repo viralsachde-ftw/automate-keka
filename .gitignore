@@ -1,3 +1,6 @@
 .vercel
 keka_tokens.json
-.env*
+.env
+.env.local
+.env.*.local
+# .env.example should be committed (it's a template)
