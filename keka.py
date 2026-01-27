@@ -25,6 +25,7 @@ TOKEN_FILE = os.environ.get('KEKA_TOKEN_FILE', 'keka_tokens.json')
 REDIS_KEY = os.environ.get('KEKA_REDIS_KEY', 'keka_tokens')
 LOG_LEVEL = os.environ.get('LOG_LEVEL', 'INFO').upper()
 TOKEN_EXPIRY_BUFFER = int(os.environ.get('TOKEN_EXPIRY_BUFFER', '300'))
+TOKEN_REFRESH_INTERVAL = int(os.environ.get('TOKEN_REFRESH_INTERVAL', '10800'))  # 3 hours in seconds
 
 # Configure logging (after LOG_LEVEL is defined)
 log_level_map = {
@@ -67,6 +68,7 @@ class KekaAttendance:
         self.access_token = None
         self.refresh_token = None
         self.token_expiry = None
+        self.last_refresh_time = None
         self.user_agent = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
         
     def generate_pkce_pair(self):
@@ -123,6 +125,7 @@ class KekaAttendance:
             self.access_token = token_data.get('access_token')
             self.refresh_token = token_data.get('refresh_token')
             self.token_expiry = self.decode_jwt_expiry(self.access_token)
+            self.last_refresh_time = time.time()
             
             self.save_tokens()
             return True
@@ -150,6 +153,26 @@ class KekaAttendance:
             return True
         return time.time() > (self.token_expiry - TOKEN_EXPIRY_BUFFER)
     
+    def should_refresh_token(self):
+        """Check if token should be refreshed (every 3 hours or before expiry)"""
+        # Always refresh if expired or about to expire
+        if self.is_token_expired():
+            return True
+        
+        # Refresh if last refresh was more than 3 hours ago
+        if self.last_refresh_time:
+            time_since_refresh = time.time() - self.last_refresh_time
+            if time_since_refresh >= TOKEN_REFRESH_INTERVAL:
+                return True
+        
+        # If no last refresh time, refresh if token expires in less than 3 hours
+        if self.token_expiry:
+            time_until_expiry = self.token_expiry - time.time()
+            if time_until_expiry < TOKEN_REFRESH_INTERVAL:
+                return True
+        
+        return False
+    
     def refresh_access_token(self):
         """Refresh access token using refresh token"""
         if not self.refresh_token:
@@ -167,21 +190,54 @@ class KekaAttendance:
         headers = {
             'Content-Type': 'application/x-www-form-urlencoded',
             'Accept': 'application/json',
+            'User-Agent': self.user_agent
         }
         
         try:
             response = requests.post(token_url, data=data, headers=headers)
+            
+            # Log detailed error information for debugging
+            if response.status_code != 200:
+                logging.error(f"Token refresh failed with status {response.status_code}")
+                try:
+                    error_data = response.json()
+                    logging.error(f"Error response: {error_data}")
+                except:
+                    logging.error(f"Error response text: {response.text}")
+            
             response.raise_for_status()
             
             token_data = response.json()
             self.access_token = token_data.get('access_token')
-            if 'refresh_token' in token_data:
+            # Always update refresh token if provided (some providers rotate refresh tokens)
+            if 'refresh_token' in token_data and token_data['refresh_token']:
                 self.refresh_token = token_data['refresh_token']
             self.token_expiry = self.decode_jwt_expiry(self.access_token)
+            self.last_refresh_time = time.time()
             
             self.save_tokens()
             logging.info("Token refreshed successfully")
             return True
+        except requests.exceptions.HTTPError as e:
+            if hasattr(e, 'response') and e.response is not None:
+                status_code = e.response.status_code
+                if status_code == 403:
+                    logging.error("403 Forbidden: Refresh token may be expired or invalid. Please re-authenticate.")
+                    try:
+                        error_data = e.response.json()
+                        logging.error(f"Error details: {error_data}")
+                    except:
+                        logging.error(f"Error response: {e.response.text}")
+                else:
+                    logging.error(f"HTTP {status_code} error refreshing token: {e}")
+                    try:
+                        error_data = e.response.json()
+                        logging.error(f"Error details: {error_data}")
+                    except:
+                        logging.error(f"Error response: {e.response.text}")
+            else:
+                logging.error(f"Error refreshing token: {e}")
+            return False
         except Exception as e:
             logging.error(f"Error refreshing token: {e}")
             return False
@@ -191,7 +247,8 @@ class KekaAttendance:
         tokens = {
             'access_token': self.access_token,
             'refresh_token': self.refresh_token,
-            'token_expiry': self.token_expiry
+            'token_expiry': self.token_expiry,
+            'last_refresh_time': self.last_refresh_time
         }
         
         if kv:
@@ -213,6 +270,9 @@ class KekaAttendance:
             try:
                 data = kv.get(REDIS_KEY)
                 if data:
+                    # Handle both string and bytes responses (Vercel KV may return bytes)
+                    if isinstance(data, bytes):
+                        data = data.decode('utf-8')
                     tokens = json.loads(data)
                     logging.info("Tokens loaded from Redis")
                 else:
@@ -225,6 +285,13 @@ class KekaAttendance:
                 with open(TOKEN_FILE, 'r') as f:
                     tokens = json.load(f)
                     logging.info("Tokens loaded from file")
+                    # If we loaded from file but Redis is available, try to save to Redis for next time
+                    if kv and tokens:
+                        try:
+                            kv.set(REDIS_KEY, json.dumps(tokens))
+                            logging.info("Tokens from file saved to Redis")
+                        except Exception as e:
+                            logging.warning(f"Failed to save tokens to Redis: {e}")
             except FileNotFoundError:
                 pass
             except Exception as e:
@@ -234,6 +301,12 @@ class KekaAttendance:
             self.access_token = tokens.get('access_token')
             self.refresh_token = tokens.get('refresh_token')
             self.token_expiry = tokens.get('token_expiry')
+            self.last_refresh_time = tokens.get('last_refresh_time')
+            # If old tokens don't have last_refresh_time, set it to now to start tracking
+            if self.last_refresh_time is None and self.token_expiry:
+                self.last_refresh_time = time.time()
+                # Save updated tokens with last_refresh_time
+                self.save_tokens()
             return True
         return False
     
@@ -244,10 +317,12 @@ class KekaAttendance:
             action_type: "in" or "out"
             clock_type: "web" (WFO, manualClockinType=1) or "remote" (WFH, manualClockinType=3)
         """
-        if self.is_token_expired():
-            logging.info("Token expired, refreshing...")
+        # Proactively refresh tokens if needed (every 3 hours or before expiry)
+        if self.should_refresh_token():
+            logging.info("Token needs refresh (expired or 3+ hours old), refreshing proactively...")
             if not self.refresh_access_token():
-                logging.error("Failed to refresh token. Please re-authenticate.")
+                logging.error("Failed to refresh token. Please re-authenticate by running: python keka.py setup")
+                logging.error("If running on Vercel, ensure KV_URL is set and run setup locally with KV_URL exported.")
                 return False
         
         # Use web clock-in endpoint (for WFO) or remote clock-in (for WFH)
@@ -340,6 +415,21 @@ def run_clock_out():
             return False
     else:
         logging.info("Not a weekday. Skipping.")
+        return False
+
+def run_token_refresh():
+    """Proactively refresh tokens every 3 hours"""
+    logging.info("Running proactive token refresh...")
+    keka = KekaAttendance()
+    if keka.load_tokens():
+        if keka.should_refresh_token():
+            logging.info("Tokens need refresh, refreshing now...")
+            return keka.refresh_access_token()
+        else:
+            logging.info("Tokens are still fresh, no refresh needed.")
+            return True
+    else:
+        logging.error("No tokens found. Cannot refresh.")
         return False
 
 # --- CLI Setup Logic ---

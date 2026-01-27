@@ -6,7 +6,7 @@ import sys
 # Add parent directory to path so we can import keka
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from keka import run_clock_in, run_clock_out
+from keka import run_clock_in, run_clock_out, run_token_refresh
 
 class handler(BaseHTTPRequestHandler):
     def do_GET(self):
@@ -22,6 +22,9 @@ class handler(BaseHTTPRequestHandler):
         elif action == 'out':
             success = run_clock_out()
             message = "Clock Out Attempted"
+        elif action == 'refresh':
+            success = run_token_refresh()
+            message = "Token Refresh Attempted"
         
         self.send_response(200)
         self.send_header('Content-type', 'text/plain')
