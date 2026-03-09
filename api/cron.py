@@ -10,6 +10,11 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from keka import KekaAttendance, run_clock_in, run_clock_out, run_token_refresh
 
 class handler(BaseHTTPRequestHandler):
+    def _callback_url(self):
+        proto = self.headers.get('x-forwarded-proto', 'https')
+        host = self.headers.get('host', '')
+        return f"{proto}://{host}/api/cron?action=oauth-callback"
+
     def do_GET(self):
         query = parse_qs(urlparse(self.path).query)
         action = query.get('action', [''])[0]
@@ -45,7 +50,7 @@ class handler(BaseHTTPRequestHandler):
         elif action == 'auth-url':
             keka = KekaAttendance()
             try:
-                auth_url, state = keka.create_oauth_bootstrap()
+                auth_url, state = keka.create_oauth_bootstrap(self._callback_url())
                 self.send_response(200)
                 self.send_header('Content-type', 'text/plain')
                 self.end_headers()
@@ -56,14 +61,40 @@ class handler(BaseHTTPRequestHandler):
                 self.end_headers()
                 self.wfile.write(f"Failed to create auth url: {e}".encode('utf-8'))
             return
+        elif action == 'auth-start':
+            keka = KekaAttendance()
+            try:
+                auth_url, _ = keka.create_oauth_bootstrap(self._callback_url())
+                self.send_response(302)
+                self.send_header('Location', auth_url)
+                self.end_headers()
+            except Exception as e:
+                self.send_response(500)
+                self.send_header('Content-type', 'text/plain')
+                self.end_headers()
+                self.wfile.write(f"Failed to start oauth: {e}".encode('utf-8'))
+            return
         elif action == 'oauth-callback':
-            code = query.get('code', [''])[0]
+            if 'error' in query:
+                err = query.get('error', ['unknown_error'])[0]
+                desc = query.get('error_description', [''])[0]
+                self.send_response(400)
+                self.send_header('Content-type', 'text/plain')
+                self.end_headers()
+                self.wfile.write(f"OAuth rejected by provider: {err} {desc}".encode('utf-8'))
+                return
+
+            code = query.get('code', [''])[0] or query.get('authorization_code', [''])[0]
             state = query.get('state', [''])[0]
             if not code or not state:
                 self.send_response(400)
                 self.send_header('Content-type', 'text/plain')
                 self.end_headers()
-                self.wfile.write(b'Missing code/state')
+                msg = (
+                    "Missing code/state. Do NOT open callback URL manually. \
+Start with /api/cron?action=auth-url, login, then let Keka redirect back automatically."
+                )
+                self.wfile.write(msg.encode('utf-8'))
                 return
             keka = KekaAttendance()
             success = keka.exchange_callback_code(code, state)

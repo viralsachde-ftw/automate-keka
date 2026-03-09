@@ -98,14 +98,14 @@ class KekaAttendance:
         auth_url = f"{self.auth_url}/connect/authorize?{urlencode(params)}"
         return auth_url, code_verifier
     
-    def create_oauth_bootstrap(self):
+    def create_oauth_bootstrap(self, callback_url=None):
         """Create OAuth URL + state and persist verifier for callback-based setup."""
         code_verifier, code_challenge = self.generate_pkce_pair()
         state = secrets.token_urlsafe(24)
 
         params = {
             'client_id': self.client_id,
-            'redirect_uri': self.redirect_uri,
+            'redirect_uri': callback_url or self.redirect_uri,
             'response_type': 'code',
             'scope': 'openid kekahr.api hiro.api offline_access',
             'code_challenge': code_challenge,
@@ -120,6 +120,7 @@ class KekaAttendance:
         key = f"{REDIS_KEY}:pending_auth:{state}"
         payload = {
             'code_verifier': code_verifier,
+            'redirect_uri': callback_url or self.redirect_uri,
             'created_at': int(time.time())
         }
         kv.setex(key, 900, json.dumps(payload))
@@ -140,21 +141,22 @@ class KekaAttendance:
             data = data.decode('utf-8')
         stored = json.loads(data)
         code_verifier = stored.get('code_verifier')
-        success = self.exchange_code_for_token(code, code_verifier)
+        redirect_uri = stored.get('redirect_uri')
+        success = self.exchange_code_for_token(code, code_verifier, redirect_uri_override=redirect_uri)
         try:
             kv.delete(key)
         except Exception:
             pass
         return success
 
-    def exchange_code_for_token(self, authorization_code, code_verifier):
+    def exchange_code_for_token(self, authorization_code, code_verifier, redirect_uri_override=None):
         """Exchange authorization code for access token"""
         token_url = f"{self.auth_url}/connect/token"
         
         data = {
             'grant_type': 'authorization_code',
             'code': authorization_code,
-            'redirect_uri': self.redirect_uri,
+            'redirect_uri': redirect_uri_override or self.redirect_uri,
             'code_verifier': code_verifier,
             'client_id': self.client_id,
             'client_secret': ''
