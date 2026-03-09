@@ -64,3 +64,33 @@ You need to generate the initial tokens and save them to the Redis store. You ca
 ## Troubleshooting
 - **Check Logs**: Go to Vercel Dashboard > **Logs** to see if the cron job ran and what happened.
 - **Token Issues**: If logs say "No tokens found", repeat Step 4 to ensure tokens are in Redis.
+
+
+## Hobby plan limitation (important)
+- Vercel Hobby only supports daily cron schedules.
+- Do **not** add a `0 */3 * * *` token-refresh cron on Hobby, it will fail validation.
+- This project is designed to refresh tokens during the actual clock-in/out runs, so it still works without a separate refresh cron.
+
+
+
+### Fallback token bootstrap (if Redis key is empty)
+- Set one of these in Vercel Project → Settings → Environment Variables:
+  - `KEKA_TOKENS_JSON` (JSON with `access_token`, `refresh_token`, optional `token_expiry`)
+  - or `KEKA_REFRESH_TOKEN` (optionally with `KEKA_ACCESS_TOKEN`, `KEKA_TOKEN_EXPIRY`)
+- On first run, the app will load these and write them to Redis automatically.
+
+
+## 🔄 Fully automated web re-auth (no code copy/paste)
+1. Set `KEKA_REDIRECT_URI` to `https://your-app.vercel.app/api/cron?action=oauth-callback` in Vercel env vars.
+2. Simplest: open `https://your-app.vercel.app/api/cron?action=auth-start` (auto-redirects to Keka login).
+   - Alternate: use `?action=auth-url` and open `open_url=...` manually.
+3. Login to Keka and approve.
+4. Keka redirects back to `/api/cron?action=oauth-callback&code=...&state=...` and tokens are saved automatically to Redis.
+
+Use this same flow anytime refresh token is revoked/expired.
+
+
+- If login shows **"An error occured while processing your request"**, your `redirect_uri` is not allowed for this OAuth client.
+  - Default client usually allows `https://alchemy.keka.com`.
+  - `?action=auth-url` now returns `redirect_uri=...` so you can verify what is being sent.
+  - Only set `KEKA_USE_DYNAMIC_CALLBACK=true` if your Keka OAuth app explicitly whitelists your Vercel callback URL.
