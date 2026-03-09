@@ -123,3 +123,9 @@ Both run Monday-Friday only (weekdays).
 4. Keka redirects back to `/api/cron?action=oauth-callback&code=...&state=...` and tokens are saved automatically to Redis.
 
 Use this same flow anytime refresh token is revoked/expired.
+
+
+- If login shows **"An error occured while processing your request"**, your `redirect_uri` is not allowed for this OAuth client.
+  - Default client usually allows `https://alchemy.keka.com`.
+  - `?action=auth-url` now returns `redirect_uri=...` so you can verify what is being sent.
+  - Only set `KEKA_USE_DYNAMIC_CALLBACK=true` if your Keka OAuth app explicitly whitelists your Vercel callback URL.

@@ -15,6 +15,10 @@ class handler(BaseHTTPRequestHandler):
         host = self.headers.get('host', '')
         return f"{proto}://{host}/api/cron?action=oauth-callback"
 
+    def _oauth_redirect_uri(self, keka):
+        use_dynamic = os.environ.get('KEKA_USE_DYNAMIC_CALLBACK', 'false').lower() == 'true'
+        return self._callback_url() if use_dynamic else keka.redirect_uri
+
     def do_GET(self):
         query = parse_qs(urlparse(self.path).query)
         action = query.get('action', [''])[0]
@@ -50,11 +54,12 @@ class handler(BaseHTTPRequestHandler):
         elif action == 'auth-url':
             keka = KekaAttendance()
             try:
-                auth_url, state = keka.create_oauth_bootstrap(self._callback_url())
+                auth_url, state = keka.create_oauth_bootstrap(self._oauth_redirect_uri(keka))
                 self.send_response(200)
                 self.send_header('Content-type', 'text/plain')
                 self.end_headers()
-                self.wfile.write(f"open_url={auth_url}\nstate={state}".encode('utf-8'))
+                redirect_uri = self._oauth_redirect_uri(keka)
+                self.wfile.write(f"open_url={auth_url}\nstate={state}\nredirect_uri={redirect_uri}".encode('utf-8'))
             except Exception as e:
                 self.send_response(500)
                 self.send_header('Content-type', 'text/plain')
@@ -64,7 +69,7 @@ class handler(BaseHTTPRequestHandler):
         elif action == 'auth-start':
             keka = KekaAttendance()
             try:
-                auth_url, _ = keka.create_oauth_bootstrap(self._callback_url())
+                auth_url, _ = keka.create_oauth_bootstrap(self._oauth_redirect_uri(keka))
                 self.send_response(302)
                 self.send_header('Location', auth_url)
                 self.end_headers()
@@ -91,8 +96,9 @@ class handler(BaseHTTPRequestHandler):
                 self.send_header('Content-type', 'text/plain')
                 self.end_headers()
                 msg = (
-                    "Missing code/state. Do NOT open callback URL manually. \
-Start with /api/cron?action=auth-url, login, then let Keka redirect back automatically."
+                    "Missing code/state. Possible redirect_uri mismatch or direct callback hit. \
+If you see 'An error occured while processing your request', your redirect URI is likely not whitelisted for this client. \
+Use /api/cron?action=auth-url and confirm KEKA_REDIRECT_URI is allowed in Keka OAuth app settings."
                 )
                 self.wfile.write(msg.encode('utf-8'))
                 return
