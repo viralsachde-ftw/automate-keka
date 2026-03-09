@@ -61,6 +61,13 @@ python keka.py setup
 - **Clock In**: 9:00 AM IST (03:30 UTC) - Monday to Friday
 - **Clock Out**: 6:30 PM IST (13:00 UTC) - Monday to Friday
 
+
+## 🔐 Token Expiry Reality Check
+- Access tokens are short-lived (few hours) by design.
+- This project now refreshes proactively every 3 hours **and** retries once with a forced refresh if Keka returns 401/403 during clock-in/out.
+- If refresh token itself is revoked/expired by Keka, you must run `python keka.py setup` again to re-authenticate.
+- You can check token health quickly via: `https://your-app.vercel.app/api/cron?action=status`
+
 ## 🔍 Monitoring
 - Check logs: Vercel Dashboard → **Logs** tab
 - Test manually: Visit `https://your-app.vercel.app/api/cron?action=in` or `?action=out`
