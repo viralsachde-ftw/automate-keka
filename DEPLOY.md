@@ -61,6 +61,14 @@ python keka.py setup
 - **Clock In**: 9:00 AM IST (03:30 UTC) - Monday to Friday
 - **Clock Out**: 6:30 PM IST (13:00 UTC) - Monday to Friday
 
+
+## 🔐 Token Expiry Reality Check
+- Hobby accounts only allow daily cron schedules on Vercel, so avoid `0 */3 * * *` unless you are on Pro.
+- Access tokens are short-lived (few hours) by design.
+- On Hobby plan, this project does **not** use a separate 3-hour refresh cron. Instead, each clock-in/out run refreshes proactively when needed, and retries once with a forced refresh if Keka returns 401/403.
+- If refresh token itself is revoked/expired by Keka, you must run `python keka.py setup` again to re-authenticate.
+- You can check token health quickly via: `https://your-app.vercel.app/api/cron?action=status`
+
 ## 🔍 Monitoring
 - Check logs: Vercel Dashboard → **Logs** tab
 - Test manually: Visit `https://your-app.vercel.app/api/cron?action=in` or `?action=out`
@@ -98,3 +106,20 @@ python keka.py setup
 - 6:30 PM IST (clock out)
 
 Both run Monday-Friday only (weekdays).
+
+
+### Fallback token bootstrap (if Redis key is empty)
+- Set one of these in Vercel Project → Settings → Environment Variables:
+  - `KEKA_TOKENS_JSON` (JSON with `access_token`, `refresh_token`, optional `token_expiry`)
+  - or `KEKA_REFRESH_TOKEN` (optionally with `KEKA_ACCESS_TOKEN`, `KEKA_TOKEN_EXPIRY`)
+- On first run, the app will load these and write them to Redis automatically.
+
+
+## 🔄 Fully automated web re-auth (no code copy/paste)
+1. Set `KEKA_REDIRECT_URI` to `https://your-app.vercel.app/api/cron?action=oauth-callback` in Vercel env vars.
+2. Simplest: open `https://your-app.vercel.app/api/cron?action=auth-start` (auto-redirects to Keka login).
+   - Alternate: use `?action=auth-url` and open `open_url=...` manually.
+3. Login to Keka and approve.
+4. Keka redirects back to `/api/cron?action=oauth-callback&code=...&state=...` and tokens are saved automatically to Redis.
+
+Use this same flow anytime refresh token is revoked/expired.
