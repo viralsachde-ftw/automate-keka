@@ -98,6 +98,55 @@ class KekaAttendance:
         auth_url = f"{self.auth_url}/connect/authorize?{urlencode(params)}"
         return auth_url, code_verifier
     
+    def create_oauth_bootstrap(self):
+        """Create OAuth URL + state and persist verifier for callback-based setup."""
+        code_verifier, code_challenge = self.generate_pkce_pair()
+        state = secrets.token_urlsafe(24)
+
+        params = {
+            'client_id': self.client_id,
+            'redirect_uri': self.redirect_uri,
+            'response_type': 'code',
+            'scope': 'openid kekahr.api hiro.api offline_access',
+            'code_challenge': code_challenge,
+            'code_challenge_method': 'S256',
+            'state': state
+        }
+        auth_url = f"{self.auth_url}/connect/authorize?{urlencode(params)}"
+
+        if not kv:
+            raise RuntimeError("KV_URL/REDIS_URL is required for automated oauth bootstrap")
+
+        key = f"{REDIS_KEY}:pending_auth:{state}"
+        payload = {
+            'code_verifier': code_verifier,
+            'created_at': int(time.time())
+        }
+        kv.setex(key, 900, json.dumps(payload))
+        return auth_url, state
+
+    def exchange_callback_code(self, code, state):
+        """Exchange callback code using verifier stored for state."""
+        if not kv:
+            logging.error("KV_URL/REDIS_URL is required for callback exchange")
+            return False
+
+        key = f"{REDIS_KEY}:pending_auth:{state}"
+        data = kv.get(key)
+        if not data:
+            logging.error("Invalid/expired oauth state")
+            return False
+        if isinstance(data, bytes):
+            data = data.decode('utf-8')
+        stored = json.loads(data)
+        code_verifier = stored.get('code_verifier')
+        success = self.exchange_code_for_token(code, code_verifier)
+        try:
+            kv.delete(key)
+        except Exception:
+            pass
+        return success
+
     def exchange_code_for_token(self, authorization_code, code_verifier):
         """Exchange authorization code for access token"""
         token_url = f"{self.auth_url}/connect/token"
@@ -297,11 +346,23 @@ class KekaAttendance:
             except Exception as e:
                  logging.error(f"Error loading tokens from file: {e}")
 
+        # Last resort for serverless bootstrapping: allow env-based tokens.
+        if not tokens:
+            tokens = self._load_tokens_from_env()
+            if tokens and kv:
+                try:
+                    kv.set(REDIS_KEY, json.dumps(tokens))
+                    logging.info("Env tokens saved to Redis")
+                except Exception as e:
+                    logging.warning(f"Failed to save env tokens to Redis: {e}")
+
         if tokens:
             self.access_token = tokens.get('access_token')
             self.refresh_token = tokens.get('refresh_token')
             self.token_expiry = tokens.get('token_expiry')
             self.last_refresh_time = tokens.get('last_refresh_time')
+            if not self.token_expiry and self.access_token:
+                self.token_expiry = self.decode_jwt_expiry(self.access_token)
             # If old tokens don't have last_refresh_time, set it to now to start tracking
             if self.last_refresh_time is None and self.token_expiry:
                 self.last_refresh_time = time.time()
@@ -310,6 +371,34 @@ class KekaAttendance:
             return True
         return False
     
+
+    def _load_tokens_from_env(self):
+        """Load tokens from env vars as last-resort bootstrap on serverless deployments."""
+        raw_json = os.environ.get('KEKA_TOKENS_JSON')
+        if raw_json:
+            try:
+                tokens = json.loads(raw_json)
+                logging.info("Tokens loaded from KEKA_TOKENS_JSON")
+                return tokens
+            except Exception as e:
+                logging.error(f"Invalid KEKA_TOKENS_JSON: {e}")
+
+        refresh_token = os.environ.get('KEKA_REFRESH_TOKEN')
+        access_token = os.environ.get('KEKA_ACCESS_TOKEN')
+        token_expiry = os.environ.get('KEKA_TOKEN_EXPIRY')
+
+        if refresh_token or access_token:
+            tokens = {
+                'access_token': access_token,
+                'refresh_token': refresh_token,
+                'token_expiry': int(token_expiry) if token_expiry and token_expiry.isdigit() else None,
+                'last_refresh_time': time.time()
+            }
+            logging.info("Tokens loaded from KEKA_* environment variables")
+            return tokens
+
+        return None
+
     def clock_action(self, action_type="in", clock_type="web"):
         """Perform clock in or clock out
         

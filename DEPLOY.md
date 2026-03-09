@@ -106,3 +106,19 @@ python keka.py setup
 - 6:30 PM IST (clock out)
 
 Both run Monday-Friday only (weekdays).
+
+
+### Fallback token bootstrap (if Redis key is empty)
+- Set one of these in Vercel Project → Settings → Environment Variables:
+  - `KEKA_TOKENS_JSON` (JSON with `access_token`, `refresh_token`, optional `token_expiry`)
+  - or `KEKA_REFRESH_TOKEN` (optionally with `KEKA_ACCESS_TOKEN`, `KEKA_TOKEN_EXPIRY`)
+- On first run, the app will load these and write them to Redis automatically.
+
+
+## 🔄 Fully automated web re-auth (no code copy/paste)
+1. Set `KEKA_REDIRECT_URI` to `https://your-app.vercel.app/api/cron?action=oauth-callback` in Vercel env vars.
+2. Open `https://your-app.vercel.app/api/cron?action=auth-url` and copy `open_url=...`.
+3. Open that URL, login to Keka, and approve.
+4. Keka redirects back to `/api/cron?action=oauth-callback&code=...&state=...` and tokens are saved automatically to Redis.
+
+Use this same flow anytime refresh token is revoked/expired.

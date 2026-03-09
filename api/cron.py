@@ -42,6 +42,36 @@ class handler(BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(status_msg.encode('utf-8'))
             return
+        elif action == 'auth-url':
+            keka = KekaAttendance()
+            try:
+                auth_url, state = keka.create_oauth_bootstrap()
+                self.send_response(200)
+                self.send_header('Content-type', 'text/plain')
+                self.end_headers()
+                self.wfile.write(f"open_url={auth_url}\nstate={state}".encode('utf-8'))
+            except Exception as e:
+                self.send_response(500)
+                self.send_header('Content-type', 'text/plain')
+                self.end_headers()
+                self.wfile.write(f"Failed to create auth url: {e}".encode('utf-8'))
+            return
+        elif action == 'oauth-callback':
+            code = query.get('code', [''])[0]
+            state = query.get('state', [''])[0]
+            if not code or not state:
+                self.send_response(400)
+                self.send_header('Content-type', 'text/plain')
+                self.end_headers()
+                self.wfile.write(b'Missing code/state')
+                return
+            keka = KekaAttendance()
+            success = keka.exchange_callback_code(code, state)
+            self.send_response(200 if success else 500)
+            self.send_header('Content-type', 'text/plain')
+            self.end_headers()
+            self.wfile.write(("OAuth setup complete" if success else "OAuth setup failed").encode('utf-8'))
+            return
         
         self.send_response(200)
         self.send_header('Content-type', 'text/plain')
