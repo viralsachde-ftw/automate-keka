@@ -7,10 +7,6 @@
     {
       "path": "/api/cron?action=out",
       "schedule": "00 13 * * 1-5"
-    },
-    {
-      "path": "/api/cron?action=refresh",
-      "schedule": "0 */3 * * *"
     }
   ],
   "builds": [

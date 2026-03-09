@@ -61,6 +61,14 @@ python keka.py setup
 - **Clock In**: 9:00 AM IST (03:30 UTC) - Monday to Friday
 - **Clock Out**: 6:30 PM IST (13:00 UTC) - Monday to Friday
 
+
+## 🔐 Token Expiry Reality Check
+- Hobby accounts only allow daily cron schedules on Vercel, so avoid `0 */3 * * *` unless you are on Pro.
+- Access tokens are short-lived (few hours) by design.
+- On Hobby plan, this project does **not** use a separate 3-hour refresh cron. Instead, each clock-in/out run refreshes proactively when needed, and retries once with a forced refresh if Keka returns 401/403.
+- If refresh token itself is revoked/expired by Keka, you must run `python keka.py setup` again to re-authenticate.
+- You can check token health quickly via: `https://your-app.vercel.app/api/cron?action=status`
+
 ## 🔍 Monitoring
 - Check logs: Vercel Dashboard → **Logs** tab
 - Test manually: Visit `https://your-app.vercel.app/api/cron?action=in` or `?action=out`

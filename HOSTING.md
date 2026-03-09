@@ -64,3 +64,10 @@ You need to generate the initial tokens and save them to the Redis store. You ca
 ## Troubleshooting
 - **Check Logs**: Go to Vercel Dashboard > **Logs** to see if the cron job ran and what happened.
 - **Token Issues**: If logs say "No tokens found", repeat Step 4 to ensure tokens are in Redis.
+
+
+## Hobby plan limitation (important)
+- Vercel Hobby only supports daily cron schedules.
+- Do **not** add a `0 */3 * * *` token-refresh cron on Hobby, it will fail validation.
+- This project is designed to refresh tokens during the actual clock-in/out runs, so it still works without a separate refresh cron.
+

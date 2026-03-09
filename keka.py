@@ -336,16 +336,6 @@ class KekaAttendance:
         
         url = f"{self.base_url}/k/attendance/api/mytime/attendance/{endpoint}"
         
-        headers = {
-            'Accept': 'application/json, text/plain, */*',
-            'Authorization': f'Bearer {self.access_token}',
-            'Content-Type': 'application/json; charset=utf-8',
-            'Origin': self.base_url,
-            'Referer': f'{self.base_url}/',
-            'X-Requested-With': 'XMLHttpRequest',
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:143.0) Gecko/20100101 Firefox/143.0'
-        }
-        
         original_punch_status = 0 if action_type.lower() == "in" else 1
         note = "In" if action_type.lower() == "in" else "Out"
         
@@ -357,19 +347,44 @@ class KekaAttendance:
             "note": note,
             "originalPunchStatus": original_punch_status
         }
-        
-        try:
-            clock_type_label = "WFO (Web)" if manual_clockin_type == 1 else "WFH (Remote)"
-            logging.info(f"Attempting {clock_type_label} clock {action_type.upper()}...")
-            response = requests.post(url, headers=headers, json=payload)
-            response.raise_for_status()
-            logging.info(f"Clock {action_type.upper()} successful ({clock_type_label}) at {datetime.now(IST).strftime('%Y-%m-%d %H:%M:%S %Z')}")
-            return True
-        except requests.exceptions.RequestException as e:
-            logging.error(f"Clock {action_type.upper()} failed: {e}")
-            if hasattr(e, 'response') and e.response is not None:
-                logging.error(f"Response: {e.response.text}")
-            return False
+
+        clock_type_label = "WFO (Web)" if manual_clockin_type == 1 else "WFH (Remote)"
+        logging.info(f"Attempting {clock_type_label} clock {action_type.upper()}...")
+
+        # If server returns 401/403 for stale token, refresh and retry once automatically.
+        for attempt in range(2):
+            headers = {
+                'Accept': 'application/json, text/plain, */*',
+                'Authorization': f'Bearer {self.access_token}',
+                'Content-Type': 'application/json; charset=utf-8',
+                'Origin': self.base_url,
+                'Referer': f'{self.base_url}/',
+                'X-Requested-With': 'XMLHttpRequest',
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:143.0) Gecko/20100101 Firefox/143.0'
+            }
+
+            try:
+                response = requests.post(url, headers=headers, json=payload)
+                response.raise_for_status()
+                logging.info(f"Clock {action_type.upper()} successful ({clock_type_label}) at {datetime.now(IST).strftime('%Y-%m-%d %H:%M:%S %Z')}")
+                return True
+            except requests.exceptions.HTTPError as e:
+                status_code = e.response.status_code if e.response is not None else None
+                if attempt == 0 and status_code in (401, 403):
+                    logging.warning("Clock API rejected current token. Attempting one forced refresh and retry...")
+                    if self.refresh_access_token():
+                        continue
+                logging.error(f"Clock {action_type.upper()} failed with HTTP {status_code}: {e}")
+                if hasattr(e, 'response') and e.response is not None:
+                    logging.error(f"Response: {e.response.text}")
+                return False
+            except requests.exceptions.RequestException as e:
+                logging.error(f"Clock {action_type.upper()} failed: {e}")
+                if hasattr(e, 'response') and e.response is not None:
+                    logging.error(f"Response: {e.response.text}")
+                return False
+
+        return False
     
     def clock_in(self, clock_type=None):
         """Clock in with optional clock type (web/WFO or remote/WFH)"""
