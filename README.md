@@ -33,7 +33,7 @@ Cron is already configured:
 - Status: `https://<your-domain>/api/cron?action=status`
 - Test clock-in: `https://<your-domain>/api/cron?action=in`
 - Test clock-out: `https://<your-domain>/api/cron?action=out`
-- One-click OAuth (no copy/paste): `https://<your-domain>/api/cron?action=auth-auto` (returns a page that auto-redirects to Keka)
+- One-click OAuth (no copy/paste): `https://<your-domain>/api/cron?action=auth-auto`
 - OAuth helper info: `https://<your-domain>/api/cron?action=auth-start`
 
 ---
