@@ -16,28 +16,19 @@ class handler(BaseHTTPRequestHandler):
         return f"{proto}://{host}/api/cron?action=oauth-callback"
 
     def _oauth_redirect_uri(self, keka):
-        """Pick redirect URI that actually returns callback to this app by default."""
+        """Use provider-safe redirect by default; dynamic callback only when explicitly enabled."""
         use_dynamic = os.environ.get('KEKA_USE_DYNAMIC_CALLBACK', '').lower() == 'true'
-        use_static = os.environ.get('KEKA_USE_STATIC_REDIRECT', '').lower() == 'true'
-
-        callback_url = self._callback_url()
         configured = (keka.redirect_uri or '').strip()
 
         if use_dynamic:
-            return callback_url
-        if use_static and configured:
+            return self._callback_url()
+
+        # Default behavior: trust configured redirect URI to avoid provider whitelist errors.
+        if configured:
             return configured
 
-        # If explicitly configured callback URI exists, use it.
-        if 'api/cron?action=oauth-callback' in configured:
-            return configured
-
-        # Default alchemy redirect never returns to this app callback; prefer callback URL.
-        if configured in ('https://alchemy.keka.com', 'http://alchemy.keka.com', ''):
-            return callback_url
-
-        # Otherwise keep user-provided custom redirect.
-        return configured
+        # Final fallback
+        return 'https://alchemy.keka.com'
 
     def do_GET(self):
         query = parse_qs(urlparse(self.path).query)
@@ -89,26 +80,10 @@ class handler(BaseHTTPRequestHandler):
         elif action == 'auth-auto':
             keka = KekaAttendance()
             try:
-                # Avoid server-side 302 spam in logs; return one 200 response and redirect client-side.
                 auth_url, _ = keka.create_oauth_bootstrap(self._oauth_redirect_uri(keka))
-                html = f"""
-<!doctype html>
-<html>
-  <head>
-    <meta charset="utf-8" />
-    <meta http-equiv="refresh" content="0; url={auth_url}" />
-    <title>Redirecting to Keka...</title>
-  </head>
-  <body>
-    <p>Redirecting to Keka login...</p>
-    <p>If not redirected, <a href="{auth_url}">click here</a>.</p>
-  </body>
-</html>
-"""
-                self.send_response(200)
-                self.send_header('Content-type', 'text/html; charset=utf-8')
+                self.send_response(302)
+                self.send_header('Location', auth_url)
                 self.end_headers()
-                self.wfile.write(html.encode('utf-8'))
             except Exception as e:
                 self.send_response(500)
                 self.send_header('Content-type', 'text/plain')
