@@ -30,6 +30,12 @@ class handler(BaseHTTPRequestHandler):
         # Final fallback
         return 'https://alchemy.keka.com'
 
+    def _auth_auto_redirect_uri(self, keka):
+        """auth-auto should try to complete setup, so prefer callback URL unless explicitly overridden."""
+        if os.environ.get('KEKA_AUTH_AUTO_USE_STATIC', '').lower() == 'true':
+            return self._oauth_redirect_uri(keka)
+        return self._callback_url()
+
     def do_GET(self):
         query = parse_qs(urlparse(self.path).query)
         action = query.get('action', [''])[0]
@@ -56,7 +62,7 @@ class handler(BaseHTTPRequestHandler):
                 status_msg = f"loaded=True expires_in_seconds={seconds_left} should_refresh={should_refresh}"
                 success = True
             else:
-                status_msg = "loaded=False hint=run_auth_auto_or_set_env_tokens"
+                status_msg = "loaded=False hint=run_auth_auto_for_callback_or_set_env_tokens"
             self.send_response(200)
             self.send_header('Content-type', 'text/plain')
             self.end_headers()
@@ -80,7 +86,7 @@ class handler(BaseHTTPRequestHandler):
         elif action == 'auth-auto':
             keka = KekaAttendance()
             try:
-                auth_url, _ = keka.create_oauth_bootstrap(self._oauth_redirect_uri(keka))
+                auth_url, _ = keka.create_oauth_bootstrap(self._auth_auto_redirect_uri(keka))
                 self.send_response(302)
                 self.send_header('Location', auth_url)
                 self.end_headers()
@@ -89,6 +95,20 @@ class handler(BaseHTTPRequestHandler):
                 self.send_header('Content-type', 'text/plain')
                 self.end_headers()
                 self.wfile.write(f"Failed to start automated oauth: {e}".encode('utf-8'))
+            return
+        elif action == 'auth-auto-static':
+            keka = KekaAttendance()
+            try:
+                # Static/provider-safe redirect (may login but not callback into this app)
+                auth_url, _ = keka.create_oauth_bootstrap(self._oauth_redirect_uri(keka))
+                self.send_response(302)
+                self.send_header('Location', auth_url)
+                self.end_headers()
+            except Exception as e:
+                self.send_response(500)
+                self.send_header('Content-type', 'text/plain')
+                self.end_headers()
+                self.wfile.write(f"Failed to start static oauth: {e}".encode('utf-8'))
             return
         elif action == 'auth-start':
             keka = KekaAttendance()
@@ -151,7 +171,7 @@ Use /api/cron?action=auth-url and confirm KEKA_REDIRECT_URI is allowed in Keka O
 
         if not action:
             self.wfile.write(
-                b"Available actions: in, out, status, auth-auto, auth-start, auth-url, oauth-callback\n"
+                b"Available actions: in, out, status, auth-auto, auth-auto-static, auth-start, auth-url, oauth-callback\n"
             )
             return
 

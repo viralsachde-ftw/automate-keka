@@ -33,7 +33,8 @@ Cron is already configured:
 - Status: `https://<your-domain>/api/cron?action=status`
 - Test clock-in: `https://<your-domain>/api/cron?action=in`
 - Test clock-out: `https://<your-domain>/api/cron?action=out`
-- One-click OAuth (no copy/paste): `https://<your-domain>/api/cron?action=auth-auto`
+- One-click OAuth (saves tokens): `https://<your-domain>/api/cron?action=auth-auto`
+- Static login-only OAuth: `https://<your-domain>/api/cron?action=auth-auto-static`
 - OAuth helper info: `https://<your-domain>/api/cron?action=auth-start`
 
 ---
@@ -43,14 +44,16 @@ Use only if your Keka OAuth client whitelists your callback URL.
 
 ### Fully automated (no copy/paste)
 1. Open: `https://<your-domain>/api/cron?action=auth-auto`
-2. Login in Keka. Callback should return to your app and save tokens automatically.
+2. Login in Keka. It should return to your app callback and save tokens automatically.
 3. Verify with `?action=status` (expect `loaded=True`).
 
 If your setup requires explicit control, use env vars:
 - Default is static `KEKA_REDIRECT_URI` (provider-safe).
 - `KEKA_USE_DYNAMIC_CALLBACK=true` only if your callback URL is whitelisted in Keka OAuth app.
 
-If provider shows **"An error occured while processing your request"**, callback is not whitelisted. Use local setup (`python keka.py setup`) or whitelist callback properly.
+If provider shows **"An error occured while processing your request"**, your callback URL is not whitelisted.
+- Use `auth-auto-static` for login-only behavior, OR
+- whitelist callback and keep using `auth-auto` for token setup.
 
 ---
 
