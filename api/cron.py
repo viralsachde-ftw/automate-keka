@@ -66,6 +66,21 @@ class handler(BaseHTTPRequestHandler):
                 self.end_headers()
                 self.wfile.write(f"Failed to create auth url: {e}".encode('utf-8'))
             return
+        elif action == 'auth-auto':
+            keka = KekaAttendance()
+            try:
+                # Fully automated browser flow: redirect user straight to provider.
+                # Requires KEKA_REDIRECT_URI to point to oauth-callback (or dynamic callback enabled + whitelisted).
+                auth_url, _ = keka.create_oauth_bootstrap(self._oauth_redirect_uri(keka))
+                self.send_response(302)
+                self.send_header('Location', auth_url)
+                self.end_headers()
+            except Exception as e:
+                self.send_response(500)
+                self.send_header('Content-type', 'text/plain')
+                self.end_headers()
+                self.wfile.write(f"Failed to start automated oauth: {e}".encode('utf-8'))
+            return
         elif action == 'auth-start':
             keka = KekaAttendance()
             try:
@@ -127,7 +142,7 @@ Use /api/cron?action=auth-url and confirm KEKA_REDIRECT_URI is allowed in Keka O
 
         if not action:
             self.wfile.write(
-                b"Available actions: in, out, status, auth-start, auth-url, oauth-callback\n"
+                b"Available actions: in, out, status, auth-auto, auth-start, auth-url, oauth-callback\n"
             )
             return
 
