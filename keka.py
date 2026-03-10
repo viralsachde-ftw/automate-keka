@@ -98,14 +98,65 @@ class KekaAttendance:
         auth_url = f"{self.auth_url}/connect/authorize?{urlencode(params)}"
         return auth_url, code_verifier
     
-    def exchange_code_for_token(self, authorization_code, code_verifier):
+    def create_oauth_bootstrap(self, callback_url=None):
+        """Create OAuth URL + state and persist verifier for callback-based setup."""
+        code_verifier, code_challenge = self.generate_pkce_pair()
+        state = secrets.token_urlsafe(24)
+
+        params = {
+            'client_id': self.client_id,
+            'redirect_uri': callback_url or self.redirect_uri,
+            'response_type': 'code',
+            'scope': 'openid kekahr.api hiro.api offline_access',
+            'code_challenge': code_challenge,
+            'code_challenge_method': 'S256',
+            'state': state
+        }
+        auth_url = f"{self.auth_url}/connect/authorize?{urlencode(params)}"
+
+        if not kv:
+            raise RuntimeError("KV_URL/REDIS_URL is required for automated oauth bootstrap")
+
+        key = f"{REDIS_KEY}:pending_auth:{state}"
+        payload = {
+            'code_verifier': code_verifier,
+            'redirect_uri': callback_url or self.redirect_uri,
+            'created_at': int(time.time())
+        }
+        kv.setex(key, 900, json.dumps(payload))
+        return auth_url, state
+
+    def exchange_callback_code(self, code, state):
+        """Exchange callback code using verifier stored for state."""
+        if not kv:
+            logging.error("KV_URL/REDIS_URL is required for callback exchange")
+            return False
+
+        key = f"{REDIS_KEY}:pending_auth:{state}"
+        data = kv.get(key)
+        if not data:
+            logging.error("Invalid/expired oauth state")
+            return False
+        if isinstance(data, bytes):
+            data = data.decode('utf-8')
+        stored = json.loads(data)
+        code_verifier = stored.get('code_verifier')
+        redirect_uri = stored.get('redirect_uri')
+        success = self.exchange_code_for_token(code, code_verifier, redirect_uri_override=redirect_uri)
+        try:
+            kv.delete(key)
+        except Exception:
+            pass
+        return success
+
+    def exchange_code_for_token(self, authorization_code, code_verifier, redirect_uri_override=None):
         """Exchange authorization code for access token"""
         token_url = f"{self.auth_url}/connect/token"
         
         data = {
             'grant_type': 'authorization_code',
             'code': authorization_code,
-            'redirect_uri': self.redirect_uri,
+            'redirect_uri': redirect_uri_override or self.redirect_uri,
             'code_verifier': code_verifier,
             'client_id': self.client_id,
             'client_secret': ''
@@ -297,11 +348,23 @@ class KekaAttendance:
             except Exception as e:
                  logging.error(f"Error loading tokens from file: {e}")
 
+        # Last resort for serverless bootstrapping: allow env-based tokens.
+        if not tokens:
+            tokens = self._load_tokens_from_env()
+            if tokens and kv:
+                try:
+                    kv.set(REDIS_KEY, json.dumps(tokens))
+                    logging.info("Env tokens saved to Redis")
+                except Exception as e:
+                    logging.warning(f"Failed to save env tokens to Redis: {e}")
+
         if tokens:
             self.access_token = tokens.get('access_token')
             self.refresh_token = tokens.get('refresh_token')
             self.token_expiry = tokens.get('token_expiry')
             self.last_refresh_time = tokens.get('last_refresh_time')
+            if not self.token_expiry and self.access_token:
+                self.token_expiry = self.decode_jwt_expiry(self.access_token)
             # If old tokens don't have last_refresh_time, set it to now to start tracking
             if self.last_refresh_time is None and self.token_expiry:
                 self.last_refresh_time = time.time()
@@ -310,6 +373,34 @@ class KekaAttendance:
             return True
         return False
     
+
+    def _load_tokens_from_env(self):
+        """Load tokens from env vars as last-resort bootstrap on serverless deployments."""
+        raw_json = os.environ.get('KEKA_TOKENS_JSON')
+        if raw_json:
+            try:
+                tokens = json.loads(raw_json)
+                logging.info("Tokens loaded from KEKA_TOKENS_JSON")
+                return tokens
+            except Exception as e:
+                logging.error(f"Invalid KEKA_TOKENS_JSON: {e}")
+
+        refresh_token = os.environ.get('KEKA_REFRESH_TOKEN')
+        access_token = os.environ.get('KEKA_ACCESS_TOKEN')
+        token_expiry = os.environ.get('KEKA_TOKEN_EXPIRY')
+
+        if refresh_token or access_token:
+            tokens = {
+                'access_token': access_token,
+                'refresh_token': refresh_token,
+                'token_expiry': int(token_expiry) if token_expiry and token_expiry.isdigit() else None,
+                'last_refresh_time': time.time()
+            }
+            logging.info("Tokens loaded from KEKA_* environment variables")
+            return tokens
+
+        return None
+
     def clock_action(self, action_type="in", clock_type="web"):
         """Perform clock in or clock out
         
@@ -336,16 +427,6 @@ class KekaAttendance:
         
         url = f"{self.base_url}/k/attendance/api/mytime/attendance/{endpoint}"
         
-        headers = {
-            'Accept': 'application/json, text/plain, */*',
-            'Authorization': f'Bearer {self.access_token}',
-            'Content-Type': 'application/json; charset=utf-8',
-            'Origin': self.base_url,
-            'Referer': f'{self.base_url}/',
-            'X-Requested-With': 'XMLHttpRequest',
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:143.0) Gecko/20100101 Firefox/143.0'
-        }
-        
         original_punch_status = 0 if action_type.lower() == "in" else 1
         note = "In" if action_type.lower() == "in" else "Out"
         
@@ -357,19 +438,44 @@ class KekaAttendance:
             "note": note,
             "originalPunchStatus": original_punch_status
         }
-        
-        try:
-            clock_type_label = "WFO (Web)" if manual_clockin_type == 1 else "WFH (Remote)"
-            logging.info(f"Attempting {clock_type_label} clock {action_type.upper()}...")
-            response = requests.post(url, headers=headers, json=payload)
-            response.raise_for_status()
-            logging.info(f"Clock {action_type.upper()} successful ({clock_type_label}) at {datetime.now(IST).strftime('%Y-%m-%d %H:%M:%S %Z')}")
-            return True
-        except requests.exceptions.RequestException as e:
-            logging.error(f"Clock {action_type.upper()} failed: {e}")
-            if hasattr(e, 'response') and e.response is not None:
-                logging.error(f"Response: {e.response.text}")
-            return False
+
+        clock_type_label = "WFO (Web)" if manual_clockin_type == 1 else "WFH (Remote)"
+        logging.info(f"Attempting {clock_type_label} clock {action_type.upper()}...")
+
+        # If server returns 401/403 for stale token, refresh and retry once automatically.
+        for attempt in range(2):
+            headers = {
+                'Accept': 'application/json, text/plain, */*',
+                'Authorization': f'Bearer {self.access_token}',
+                'Content-Type': 'application/json; charset=utf-8',
+                'Origin': self.base_url,
+                'Referer': f'{self.base_url}/',
+                'X-Requested-With': 'XMLHttpRequest',
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:143.0) Gecko/20100101 Firefox/143.0'
+            }
+
+            try:
+                response = requests.post(url, headers=headers, json=payload)
+                response.raise_for_status()
+                logging.info(f"Clock {action_type.upper()} successful ({clock_type_label}) at {datetime.now(IST).strftime('%Y-%m-%d %H:%M:%S %Z')}")
+                return True
+            except requests.exceptions.HTTPError as e:
+                status_code = e.response.status_code if e.response is not None else None
+                if attempt == 0 and status_code in (401, 403):
+                    logging.warning("Clock API rejected current token. Attempting one forced refresh and retry...")
+                    if self.refresh_access_token():
+                        continue
+                logging.error(f"Clock {action_type.upper()} failed with HTTP {status_code}: {e}")
+                if hasattr(e, 'response') and e.response is not None:
+                    logging.error(f"Response: {e.response.text}")
+                return False
+            except requests.exceptions.RequestException as e:
+                logging.error(f"Clock {action_type.upper()} failed: {e}")
+                if hasattr(e, 'response') and e.response is not None:
+                    logging.error(f"Response: {e.response.text}")
+                return False
+
+        return False
     
     def clock_in(self, clock_type=None):
         """Clock in with optional clock type (web/WFO or remote/WFH)"""
