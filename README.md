@@ -30,10 +30,10 @@ Cron is already configured:
 ---
 
 ## URLs you can use
-- Status: `https://<your-domain>/api/cron?action=status`
-- Test clock-in: `https://<your-domain>/api/cron?action=in`
-- Test clock-out: `https://<your-domain>/api/cron?action=out`
-- OAuth helper info: `https://<your-domain>/api/cron?action=auth-start`
+- Status: `https://automate-keka.vercel.app/api/cron?action=status`
+- Test clock-in: `https://automate-keka.vercel.app/api/cron?action=in`
+- Test clock-out: `https://automate-keka.vercel.app/api/cron?action=out`
+- OAuth helper info: `https://automate-keka.vercel.app/api/cron?action=auth-start`
 
 ---
 
@@ -41,9 +41,9 @@ Cron is already configured:
 Use only if your Keka OAuth client whitelists your callback URL.
 
 1. Set env vars:
-   - `KEKA_REDIRECT_URI=https://<your-domain>/api/cron?action=oauth-callback`
+   - `KEKA_REDIRECT_URI=https://automate-keka.vercel.app/api/cron?action=oauth-callback`
    - `KEKA_USE_DYNAMIC_CALLBACK=true`
-2. Open: `https://<your-domain>/api/cron?action=auth-start`
+2. Open: `https://automate-keka.vercel.app/api/cron?action=auth-start`
 3. Copy/open the `auth_url` shown in response.
 
 If provider shows **"An error occured while processing your request"**, callback is not whitelisted. Use the reliable local setup (`python keka.py setup`) instead.
