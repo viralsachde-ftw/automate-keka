@@ -69,10 +69,21 @@ class handler(BaseHTTPRequestHandler):
         elif action == 'auth-start':
             keka = KekaAttendance()
             try:
-                auth_url, _ = keka.create_oauth_bootstrap(self._oauth_redirect_uri(keka))
-                self.send_response(302)
-                self.send_header('Location', auth_url)
+                redirect_uri = self._oauth_redirect_uri(keka)
+                auth_url, state = keka.create_oauth_bootstrap(redirect_uri)
+                self.send_response(200)
+                self.send_header('Content-type', 'text/plain')
                 self.end_headers()
+                msg = (
+                    "OAuth start ready.\n"
+                    f"redirect_uri={redirect_uri}\n"
+                    f"state={state}\n"
+                    "Open the URL below to continue login (copy/paste in browser):\n"
+                    f"{auth_url}\n\n"
+                    "If provider shows an error page, your redirect_uri is not whitelisted.\n"
+                    "Then use local setup: python keka.py setup (with KV_URL) and skip web flow."
+                )
+                self.wfile.write(msg.encode('utf-8'))
             except Exception as e:
                 self.send_response(500)
                 self.send_header('Content-type', 'text/plain')
@@ -113,7 +124,13 @@ Use /api/cron?action=auth-url and confirm KEKA_REDIRECT_URI is allowed in Keka O
         self.send_response(200)
         self.send_header('Content-type', 'text/plain')
         self.end_headers()
-        
+
+        if not action:
+            self.wfile.write(
+                b"Available actions: in, out, status, auth-start, auth-url, oauth-callback\n"
+            )
+            return
+
         status = "Success" if success else "Failed/Skipped"
         self.wfile.write(f"{message}: {status}".encode('utf-8'))
         return
