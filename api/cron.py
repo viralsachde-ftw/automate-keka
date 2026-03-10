@@ -16,8 +16,28 @@ class handler(BaseHTTPRequestHandler):
         return f"{proto}://{host}/api/cron?action=oauth-callback"
 
     def _oauth_redirect_uri(self, keka):
-        use_dynamic = os.environ.get('KEKA_USE_DYNAMIC_CALLBACK', 'false').lower() == 'true'
-        return self._callback_url() if use_dynamic else keka.redirect_uri
+        """Pick redirect URI that actually returns callback to this app by default."""
+        use_dynamic = os.environ.get('KEKA_USE_DYNAMIC_CALLBACK', '').lower() == 'true'
+        use_static = os.environ.get('KEKA_USE_STATIC_REDIRECT', '').lower() == 'true'
+
+        callback_url = self._callback_url()
+        configured = (keka.redirect_uri or '').strip()
+
+        if use_dynamic:
+            return callback_url
+        if use_static and configured:
+            return configured
+
+        # If explicitly configured callback URI exists, use it.
+        if 'api/cron?action=oauth-callback' in configured:
+            return configured
+
+        # Default alchemy redirect never returns to this app callback; prefer callback URL.
+        if configured in ('https://alchemy.keka.com', 'http://alchemy.keka.com', ''):
+            return callback_url
+
+        # Otherwise keep user-provided custom redirect.
+        return configured
 
     def do_GET(self):
         query = parse_qs(urlparse(self.path).query)
@@ -45,7 +65,7 @@ class handler(BaseHTTPRequestHandler):
                 status_msg = f"loaded=True expires_in_seconds={seconds_left} should_refresh={should_refresh}"
                 success = True
             else:
-                status_msg = "loaded=False"
+                status_msg = "loaded=False hint=run_auth_auto_or_set_env_tokens"
             self.send_response(200)
             self.send_header('Content-type', 'text/plain')
             self.end_headers()
@@ -69,12 +89,26 @@ class handler(BaseHTTPRequestHandler):
         elif action == 'auth-auto':
             keka = KekaAttendance()
             try:
-                # Fully automated browser flow: redirect user straight to provider.
-                # Requires KEKA_REDIRECT_URI to point to oauth-callback (or dynamic callback enabled + whitelisted).
+                # Avoid server-side 302 spam in logs; return one 200 response and redirect client-side.
                 auth_url, _ = keka.create_oauth_bootstrap(self._oauth_redirect_uri(keka))
-                self.send_response(302)
-                self.send_header('Location', auth_url)
+                html = f"""
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <meta http-equiv="refresh" content="0; url={auth_url}" />
+    <title>Redirecting to Keka...</title>
+  </head>
+  <body>
+    <p>Redirecting to Keka login...</p>
+    <p>If not redirected, <a href="{auth_url}">click here</a>.</p>
+  </body>
+</html>
+"""
+                self.send_response(200)
+                self.send_header('Content-type', 'text/html; charset=utf-8')
                 self.end_headers()
+                self.wfile.write(html.encode('utf-8'))
             except Exception as e:
                 self.send_response(500)
                 self.send_header('Content-type', 'text/plain')

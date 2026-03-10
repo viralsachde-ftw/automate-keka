@@ -33,7 +33,7 @@ Cron is already configured:
 - Status: `https://<your-domain>/api/cron?action=status`
 - Test clock-in: `https://<your-domain>/api/cron?action=in`
 - Test clock-out: `https://<your-domain>/api/cron?action=out`
-- One-click OAuth (no copy/paste): `https://<your-domain>/api/cron?action=auth-auto`
+- One-click OAuth (no copy/paste): `https://<your-domain>/api/cron?action=auth-auto` (returns a page that auto-redirects to Keka)
 - OAuth helper info: `https://<your-domain>/api/cron?action=auth-start`
 
 ---
@@ -42,11 +42,13 @@ Cron is already configured:
 Use only if your Keka OAuth client whitelists your callback URL.
 
 ### Fully automated (no copy/paste)
-1. Set env vars:
-   - `KEKA_REDIRECT_URI=https://<your-domain>/api/cron?action=oauth-callback`
-   - `KEKA_USE_DYNAMIC_CALLBACK=true`
-2. Open: `https://<your-domain>/api/cron?action=auth-auto`
-3. Login in Keka. Callback is handled automatically and tokens are saved.
+1. Open: `https://<your-domain>/api/cron?action=auth-auto`
+2. Login in Keka. Callback should return to your app and save tokens automatically.
+3. Verify with `?action=status` (expect `loaded=True`).
+
+If your setup requires explicit control, use env vars:
+- `KEKA_USE_DYNAMIC_CALLBACK=true` (force app callback)
+- `KEKA_USE_STATIC_REDIRECT=true` (force `KEKA_REDIRECT_URI` value)
 
 If provider shows **"An error occured while processing your request"**, callback is not whitelisted. Use local setup (`python keka.py setup`) or whitelist callback properly.
 
