@@ -99,16 +99,14 @@ class KekaAttendance:
         return auth_url, code_verifier
     
     def create_oauth_bootstrap(self, callback_url=None):
-        """Create OAuth URL. Encodes PKCE verifier inside the state so no Redis is needed."""
+        """Create OAuth URL. Returns (auth_url, state, code_verifier, redirect_uri)."""
         code_verifier, code_challenge = self.generate_pkce_pair()
-        # Pack verifier + redirect_uri into the state so the callback can decode it
-        # without any server-side storage.
-        payload = json.dumps({'v': code_verifier, 'r': callback_url or self.redirect_uri or ''})
-        state = base64.urlsafe_b64encode(payload.encode()).decode().rstrip('=')
+        state = secrets.token_urlsafe(24)
+        redirect_uri = callback_url or self.redirect_uri or ''
 
         params = {
             'client_id': self.client_id,
-            'redirect_uri': callback_url or self.redirect_uri,
+            'redirect_uri': redirect_uri,
             'response_type': 'code',
             'scope': 'openid kekahr.api hiro.api offline_access',
             'code_challenge': code_challenge,
@@ -116,22 +114,13 @@ class KekaAttendance:
             'state': state
         }
         auth_url = f"{self.auth_url}/connect/authorize?{urlencode(params)}"
-        return auth_url, state
+        return auth_url, state, code_verifier, redirect_uri
 
-    def exchange_callback_code(self, code, state):
-        """Decode verifier from state and exchange code for tokens. No Redis needed."""
-        try:
-            # Restore base64 padding
-            padded = state + '=' * (-len(state) % 4)
-            stored = json.loads(base64.urlsafe_b64decode(padded).decode())
-        except Exception as e:
-            return f"Could not decode state parameter: {e}"
-
-        code_verifier = stored.get('v')
-        redirect_uri = stored.get('r') or None
+    def exchange_callback_code(self, code, code_verifier, redirect_uri=None):
+        """Exchange auth code using the provided PKCE verifier. No Redis needed."""
         if not code_verifier:
-            return "State missing PKCE verifier"
-        return self.exchange_code_for_token(code, code_verifier, redirect_uri_override=redirect_uri)
+            return "Missing code_verifier"
+        return self.exchange_code_for_token(code, code_verifier, redirect_uri_override=redirect_uri or None)
 
     def exchange_code_for_token(self, authorization_code, code_verifier, redirect_uri_override=None):
         """Exchange authorization code for access token"""
