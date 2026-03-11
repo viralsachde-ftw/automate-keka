@@ -75,12 +75,12 @@ class KekaAttendance:
         """Generate PKCE code verifier and challenge"""
         code_verifier = base64.urlsafe_b64encode(secrets.token_bytes(32)).decode('utf-8')
         code_verifier = code_verifier.replace('=', '').replace('+', '-').replace('/', '_')
-        
+        return code_verifier, self._pkce_challenge_from_verifier(code_verifier)
+
+    def _pkce_challenge_from_verifier(self, code_verifier):
         code_challenge = hashlib.sha256(code_verifier.encode('utf-8')).digest()
         code_challenge = base64.urlsafe_b64encode(code_challenge).decode('utf-8')
-        code_challenge = code_challenge.replace('=', '').replace('+', '-').replace('/', '_')
-        
-        return code_verifier, code_challenge
+        return code_challenge.replace('=', '').replace('+', '-').replace('/', '_')
     
     def get_authorization_url(self):
         """Generate OAuth authorization URL with PKCE"""
@@ -98,9 +98,14 @@ class KekaAttendance:
         auth_url = f"{self.auth_url}/connect/authorize?{urlencode(params)}"
         return auth_url, code_verifier
     
-    def create_oauth_bootstrap(self, callback_url=None):
-        """Create OAuth URL. Returns (auth_url, state, code_verifier, redirect_uri)."""
-        code_verifier, code_challenge = self.generate_pkce_pair()
+    def create_oauth_bootstrap(self, callback_url=None, code_verifier=None):
+        """Create OAuth URL. Returns (auth_url, state, code_verifier, redirect_uri).
+        Pass code_verifier to reuse an existing PKCE verifier (e.g. when the redirect_uri
+        itself embeds the verifier and must be built before the auth URL)."""
+        if code_verifier:
+            code_challenge = self._pkce_challenge_from_verifier(code_verifier)
+        else:
+            code_verifier, code_challenge = self.generate_pkce_pair()
         state = secrets.token_urlsafe(24)
         redirect_uri = callback_url or self.redirect_uri or ''
 
