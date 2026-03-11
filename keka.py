@@ -127,27 +127,25 @@ class KekaAttendance:
         return auth_url, state
 
     def exchange_callback_code(self, code, state):
-        """Exchange callback code using verifier stored for state."""
+        """Exchange callback code using verifier stored for state. Returns True or error string."""
         if not kv:
-            logging.error("KV_URL/REDIS_URL is required for callback exchange")
-            return False
+            return "Redis/KV not configured (KV_URL/REDIS_URL missing)"
 
         key = f"{REDIS_KEY}:pending_auth:{state}"
         data = kv.get(key)
         if not data:
-            logging.error("Invalid/expired oauth state")
-            return False
+            return f"State not found in Redis (expired or wrong page load). State prefix: {state[:12]}..."
         if isinstance(data, bytes):
             data = data.decode('utf-8')
         stored = json.loads(data)
         code_verifier = stored.get('code_verifier')
         redirect_uri = stored.get('redirect_uri')
-        success = self.exchange_code_for_token(code, code_verifier, redirect_uri_override=redirect_uri)
+        result = self.exchange_code_for_token(code, code_verifier, redirect_uri_override=redirect_uri)
         try:
             kv.delete(key)
         except Exception:
             pass
-        return success
+        return result
 
     def exchange_code_for_token(self, authorization_code, code_verifier, redirect_uri_override=None):
         """Exchange authorization code for access token"""
@@ -170,19 +168,22 @@ class KekaAttendance:
         
         try:
             response = requests.post(token_url, data=data, headers=headers)
-            response.raise_for_status()
-            
+            if not response.ok:
+                err_body = response.text[:500]
+                logging.error(f"Token exchange HTTP {response.status_code}: {err_body}")
+                return f"Keka token endpoint returned {response.status_code}: {err_body}"
+
             token_data = response.json()
             self.access_token = token_data.get('access_token')
             self.refresh_token = token_data.get('refresh_token')
             self.token_expiry = self.decode_jwt_expiry(self.access_token)
             self.last_refresh_time = time.time()
-            
+
             self.save_tokens()
             return True
         except Exception as e:
             logging.error(f"Error exchange_code_for_token: {e}")
-            return False
+            return f"Exception during token exchange: {e}"
             
     def decode_jwt_expiry(self, token):
         """Decode JWT to get expiry time"""

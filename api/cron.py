@@ -133,8 +133,10 @@ class handler(BaseHTTPRequestHandler):
   <div id="msg"></div>
   <script>
     function extractParams(raw) {{
+      // Encode spaces so URL() doesn't throw (browsers sometimes copy unencoded spaces)
+      var sanitized = raw.replace(/ /g, '%20');
       // Try various formats: full URL, URL without scheme, raw query string
-      var attempts = [raw, 'https://' + raw, 'https://x.x/?' + raw.replace(/^[?&]/, '')];
+      var attempts = [sanitized, 'https://' + sanitized, 'https://x.x/?' + sanitized.replace(/^[?&]/, '')];
       for (var i = 0; i < attempts.length; i++) {{
         try {{
           var p = new URL(attempts[i]);
@@ -249,11 +251,13 @@ Use /api/cron?action=auth-url and confirm KEKA_REDIRECT_URI is allowed in Keka O
                 self.wfile.write(msg.encode('utf-8'))
                 return
             keka = KekaAttendance()
-            success = keka.exchange_callback_code(code, state)
-            self.send_response(200 if success else 500)
+            result = keka.exchange_callback_code(code, state)
+            ok = result is True
+            self.send_response(200 if ok else 500)
             self.send_header('Content-type', 'text/plain')
             self.end_headers()
-            self.wfile.write(("OAuth setup complete" if success else "OAuth setup failed").encode('utf-8'))
+            msg = "OAuth setup complete" if ok else f"OAuth setup failed: {result}"
+            self.wfile.write(msg.encode('utf-8'))
             return
         
         self.send_response(200)
