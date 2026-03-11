@@ -99,9 +99,12 @@ class KekaAttendance:
         return auth_url, code_verifier
     
     def create_oauth_bootstrap(self, callback_url=None):
-        """Create OAuth URL + state and persist verifier for callback-based setup."""
+        """Create OAuth URL. Encodes PKCE verifier inside the state so no Redis is needed."""
         code_verifier, code_challenge = self.generate_pkce_pair()
-        state = secrets.token_urlsafe(24)
+        # Pack verifier + redirect_uri into the state so the callback can decode it
+        # without any server-side storage.
+        payload = json.dumps({'v': code_verifier, 'r': callback_url or self.redirect_uri or ''})
+        state = base64.urlsafe_b64encode(payload.encode()).decode().rstrip('=')
 
         params = {
             'client_id': self.client_id,
@@ -113,39 +116,22 @@ class KekaAttendance:
             'state': state
         }
         auth_url = f"{self.auth_url}/connect/authorize?{urlencode(params)}"
-
-        if not kv:
-            raise RuntimeError("KV_URL/REDIS_URL is required for automated oauth bootstrap")
-
-        key = f"{REDIS_KEY}:pending_auth:{state}"
-        payload = {
-            'code_verifier': code_verifier,
-            'redirect_uri': callback_url or self.redirect_uri,
-            'created_at': int(time.time())
-        }
-        kv.setex(key, 900, json.dumps(payload))
         return auth_url, state
 
     def exchange_callback_code(self, code, state):
-        """Exchange callback code using verifier stored for state. Returns True or error string."""
-        if not kv:
-            return "Redis/KV not configured (KV_URL/REDIS_URL missing)"
-
-        key = f"{REDIS_KEY}:pending_auth:{state}"
-        data = kv.get(key)
-        if not data:
-            return f"State not found in Redis (expired or wrong page load). State prefix: {state[:12]}..."
-        if isinstance(data, bytes):
-            data = data.decode('utf-8')
-        stored = json.loads(data)
-        code_verifier = stored.get('code_verifier')
-        redirect_uri = stored.get('redirect_uri')
-        result = self.exchange_code_for_token(code, code_verifier, redirect_uri_override=redirect_uri)
+        """Decode verifier from state and exchange code for tokens. No Redis needed."""
         try:
-            kv.delete(key)
-        except Exception:
-            pass
-        return result
+            # Restore base64 padding
+            padded = state + '=' * (-len(state) % 4)
+            stored = json.loads(base64.urlsafe_b64decode(padded).decode())
+        except Exception as e:
+            return f"Could not decode state parameter: {e}"
+
+        code_verifier = stored.get('v')
+        redirect_uri = stored.get('r') or None
+        if not code_verifier:
+            return "State missing PKCE verifier"
+        return self.exchange_code_for_token(code, code_verifier, redirect_uri_override=redirect_uri)
 
     def exchange_code_for_token(self, authorization_code, code_verifier, redirect_uri_override=None):
         """Exchange authorization code for access token"""
