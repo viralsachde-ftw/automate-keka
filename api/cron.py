@@ -71,11 +71,10 @@ class handler(BaseHTTPRequestHandler):
         elif action == 'auth-url':
             keka = KekaAttendance()
             try:
-                auth_url, state = keka.create_oauth_bootstrap(self._oauth_redirect_uri(keka))
+                auth_url, state, verifier, redirect_uri = keka.create_oauth_bootstrap(self._oauth_redirect_uri(keka))
                 self.send_response(200)
                 self.send_header('Content-type', 'text/plain')
                 self.end_headers()
-                redirect_uri = self._oauth_redirect_uri(keka)
                 self.wfile.write(f"open_url={auth_url}\nstate={state}\nredirect_uri={redirect_uri}".encode('utf-8'))
             except Exception as e:
                 self.send_response(500)
@@ -86,14 +85,12 @@ class handler(BaseHTTPRequestHandler):
         elif action == 'auth-auto':
             keka = KekaAttendance()
             try:
-                # Use the whitelisted static redirect URI so Keka doesn't reject the request.
-                # After login, Keka redirects to that URI with code+state; the user pastes
-                # that URL back into the form below and JS calls our oauth-callback handler.
                 redirect_uri = self._oauth_redirect_uri(keka)
-                auth_url, _ = keka.create_oauth_bootstrap(redirect_uri)
+                auth_url, _, code_verifier, redir = keka.create_oauth_bootstrap(redirect_uri)
                 proto = self.headers.get('x-forwarded-proto', 'https')
                 host = self.headers.get('host', '')
                 callback_base = f"{proto}://{host}/api/cron" if host else '/api/cron'
+                # code_verifier is baked into the page JS — no server-side storage needed
                 html = f"""<!DOCTYPE html>
 <html>
 <head>
@@ -101,7 +98,7 @@ class handler(BaseHTTPRequestHandler):
   <title>Keka Auth Setup</title>
   <style>
     body{{font-family:sans-serif;max-width:700px;margin:40px auto;padding:0 16px}}
-    input,textarea{{width:100%;box-sizing:border-box;padding:8px;font-size:14px;margin:8px 0}}
+    textarea{{width:100%;box-sizing:border-box;padding:8px;font-size:14px;margin:8px 0}}
     button{{padding:10px 20px;font-size:14px;cursor:pointer;margin-right:8px}}
     #msg{{margin-top:12px;font-weight:bold;white-space:pre-wrap}}
     .step{{margin:18px 0}}
@@ -114,35 +111,32 @@ class handler(BaseHTTPRequestHandler):
   <div class="step">
     <strong>Step 1:</strong>
     <a href="{auth_url}" target="_blank" rel="noopener">&#x1F517; Open Keka Login</a>
-    &nbsp;(opens in a new tab — do <em>not</em> close this page)
+    &nbsp;(opens in a new tab — <strong>do not close or refresh this page</strong>)
   </div>
   <div class="step">
     <strong>Step 2:</strong> Log in with your Keka credentials.<br>
-    After login, your browser will redirect to <code>{redirect_uri}</code>.<br>
+    After login, your browser will redirect to <code>{redir or 'alchemy.keka.com'}</code>.<br>
     The page will look blank or show an error — that is normal.<br>
     <strong>Copy the entire URL from your browser address bar.</strong>
-    <div class="tip">Example: <code>https://alchemy.keka.com/?code=ABC123&amp;state=XYZ&amp;...</code></div>
   </div>
   <div class="step">
-    <strong>Step 3:</strong> Paste the URL below and click <em>Complete Setup</em>.<br>
-    <div class="tip">Do this within ~60 seconds of being redirected — the code expires quickly.</div>
-    <textarea id="redirectUrl" rows="3" placeholder="Paste the full redirect URL here&#10;e.g. https://alchemy.keka.com/?code=4D8C...&state=eGc1..."></textarea>
+    <strong>Step 3:</strong> Paste the URL below and click <em>Complete Setup</em> immediately.
+    <textarea id="redirectUrl" rows="3" placeholder="Paste full redirect URL here e.g. https://alchemy.keka.com/?code=...&state=..."></textarea>
     <button onclick="completeAuth()">Complete Setup</button>
     <button onclick="checkStatus()">Check Status</button>
   </div>
   <div id="msg"></div>
   <script>
-    function extractParams(raw) {{
-      // Encode spaces so URL() doesn't throw (browsers sometimes copy unencoded spaces)
+    var CODE_VERIFIER = {repr(code_verifier)};
+    var REDIRECT_URI = {repr(redir or '')};
+    function extractCode(raw) {{
       var sanitized = raw.replace(/ /g, '%20');
-      // Try various formats: full URL, URL without scheme, raw query string
       var attempts = [sanitized, 'https://' + sanitized, 'https://x.x/?' + sanitized.replace(/^[?&]/, '')];
       for (var i = 0; i < attempts.length; i++) {{
         try {{
           var p = new URL(attempts[i]);
           var code = p.searchParams.get('code') || p.searchParams.get('authorization_code');
-          var state = p.searchParams.get('state');
-          if (code && state) return {{code: code, state: state}};
+          if (code) return code;
         }} catch(e) {{}}
       }}
       return null;
@@ -151,19 +145,23 @@ class handler(BaseHTTPRequestHandler):
       var raw = document.getElementById('redirectUrl').value.trim();
       var msg = document.getElementById('msg');
       if (!raw) {{ msg.textContent = 'Please paste the redirect URL first.'; return; }}
-      var params = extractParams(raw);
-      if (!params) {{
-        msg.textContent = 'Could not find code and state in what you pasted.\\nMake sure you copied the full URL from the browser address bar after logging in to Keka.\\nIt should look like: https://alchemy.keka.com/?code=...&state=...';
+      var code = extractCode(raw);
+      if (!code) {{
+        msg.textContent = 'Could not find the authorization code in the URL.\\nMake sure you copied the full URL from the browser address bar.';
         return;
       }}
       msg.textContent = 'Exchanging code for tokens...';
-      fetch('{callback_base}?action=oauth-callback&code=' + encodeURIComponent(params.code) + '&state=' + encodeURIComponent(params.state))
+      var url = '{callback_base}?action=oauth-callback'
+        + '&code=' + encodeURIComponent(code)
+        + '&verifier=' + encodeURIComponent(CODE_VERIFIER)
+        + '&redirect_uri=' + encodeURIComponent(REDIRECT_URI);
+      fetch(url)
         .then(function(r) {{ return r.text(); }})
         .then(function(t) {{
           if (t.toLowerCase().indexOf('complete') !== -1) {{
-            msg.textContent = '\\u2705 ' + t + '\\nTokens saved. Click Check Status to verify, then cron jobs will work automatically.';
+            msg.textContent = '\\u2705 ' + t + '\\nTokens saved. Cron jobs will now work automatically.';
           }} else {{
-            msg.textContent = '\\u274C ' + t + '\\nThe code may have expired (>60s). Go back to Step 1 and try again immediately after login.';
+            msg.textContent = '\\u274C ' + t;
           }}
         }})
         .catch(function(err) {{ msg.textContent = 'Request failed: ' + err; }});
@@ -192,8 +190,7 @@ class handler(BaseHTTPRequestHandler):
         elif action == 'auth-auto-static':
             keka = KekaAttendance()
             try:
-                # Static/provider-safe redirect (may login but not callback into this app)
-                auth_url, _ = keka.create_oauth_bootstrap(self._oauth_redirect_uri(keka))
+                auth_url, _, _v, _r = keka.create_oauth_bootstrap(self._oauth_redirect_uri(keka))
                 self.send_response(302)
                 self.send_header('Location', auth_url)
                 self.end_headers()
@@ -207,7 +204,7 @@ class handler(BaseHTTPRequestHandler):
             keka = KekaAttendance()
             try:
                 redirect_uri = self._oauth_redirect_uri(keka)
-                auth_url, state = keka.create_oauth_bootstrap(redirect_uri)
+                auth_url, state, _v, _r = keka.create_oauth_bootstrap(redirect_uri)
                 self.send_response(200)
                 self.send_header('Content-type', 'text/plain')
                 self.end_headers()
@@ -238,20 +235,16 @@ class handler(BaseHTTPRequestHandler):
                 return
 
             code = query.get('code', [''])[0] or query.get('authorization_code', [''])[0]
-            state = query.get('state', [''])[0]
-            if not code or not state:
+            verifier = query.get('verifier', [''])[0]
+            redirect_uri = query.get('redirect_uri', [''])[0] or None
+            if not code or not verifier:
                 self.send_response(400)
                 self.send_header('Content-type', 'text/plain')
                 self.end_headers()
-                msg = (
-                    "Missing code/state. Possible redirect_uri mismatch or direct callback hit. \
-If you see 'An error occured while processing your request', your redirect URI is likely not whitelisted for this client. \
-Use /api/cron?action=auth-url and confirm KEKA_REDIRECT_URI is allowed in Keka OAuth app settings."
-                )
-                self.wfile.write(msg.encode('utf-8'))
+                self.wfile.write(b"Missing code or verifier parameter.")
                 return
             keka = KekaAttendance()
-            result = keka.exchange_callback_code(code, state)
+            result = keka.exchange_callback_code(code, verifier, redirect_uri=redirect_uri)
             ok = result is True
             self.send_response(200 if ok else 500)
             self.send_header('Content-type', 'text/plain')
