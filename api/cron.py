@@ -91,7 +91,9 @@ class handler(BaseHTTPRequestHandler):
                 # that URL back into the form below and JS calls our oauth-callback handler.
                 redirect_uri = self._oauth_redirect_uri(keka)
                 auth_url, _ = keka.create_oauth_bootstrap(redirect_uri)
-                callback_base = f"{self.headers.get('x-forwarded-proto','https')}://{self.headers.get('host','')}/api/cron"
+                proto = self.headers.get('x-forwarded-proto', 'https')
+                host = self.headers.get('host', '')
+                callback_base = f"{proto}://{host}/api/cron" if host else '/api/cron'
                 html = f"""<!DOCTYPE html>
 <html>
 <head>
@@ -99,58 +101,78 @@ class handler(BaseHTTPRequestHandler):
   <title>Keka Auth Setup</title>
   <style>
     body{{font-family:sans-serif;max-width:700px;margin:40px auto;padding:0 16px}}
-    input{{width:100%;box-sizing:border-box;padding:8px;font-size:14px;margin:8px 0}}
-    button{{padding:10px 20px;font-size:14px;cursor:pointer}}
-    #msg{{margin-top:12px;font-weight:bold}}
-    .step{{margin:16px 0}}
+    input,textarea{{width:100%;box-sizing:border-box;padding:8px;font-size:14px;margin:8px 0}}
+    button{{padding:10px 20px;font-size:14px;cursor:pointer;margin-right:8px}}
+    #msg{{margin-top:12px;font-weight:bold;white-space:pre-wrap}}
+    .step{{margin:18px 0}}
+    code{{background:#f4f4f4;padding:2px 5px;border-radius:3px;font-size:13px}}
+    .tip{{color:#666;font-size:13px;margin-top:4px}}
   </style>
 </head>
 <body>
   <h2>Keka Authentication Setup</h2>
   <div class="step">
     <strong>Step 1:</strong>
-    <a href="{auth_url}" target="_blank" rel="noopener">Open Keka Login &rarr;</a>
-    (opens in a new tab)
+    <a href="{auth_url}" target="_blank" rel="noopener">&#x1F517; Open Keka Login</a>
+    &nbsp;(opens in a new tab — do <em>not</em> close this page)
   </div>
   <div class="step">
-    <strong>Step 2:</strong> Log in with your Keka credentials.
-    After login, your browser will be redirected to a URL starting with
-    <code>{redirect_uri}</code>.
-    The page may look blank or show an error &mdash; that is expected.
-    <strong>Copy the full URL from your browser address bar.</strong>
+    <strong>Step 2:</strong> Log in with your Keka credentials.<br>
+    After login, your browser will redirect to <code>{redirect_uri}</code>.<br>
+    The page will look blank or show an error — that is normal.<br>
+    <strong>Copy the entire URL from your browser address bar.</strong>
+    <div class="tip">Example: <code>https://alchemy.keka.com/?code=ABC123&amp;state=XYZ&amp;...</code></div>
   </div>
   <div class="step">
-    <strong>Step 3:</strong> Paste the full redirect URL below and click <em>Complete Setup</em>.
+    <strong>Step 3:</strong> Paste the URL below and click <em>Complete Setup</em>.<br>
+    <div class="tip">Do this within ~60 seconds of being redirected — the code expires quickly.</div>
+    <textarea id="redirectUrl" rows="3" placeholder="Paste the full redirect URL here&#10;e.g. https://alchemy.keka.com/?code=4D8C...&state=eGc1..."></textarea>
+    <button onclick="completeAuth()">Complete Setup</button>
+    <button onclick="checkStatus()">Check Status</button>
   </div>
-  <input type="text" id="redirectUrl" placeholder="Paste the full redirect URL here (e.g. https://alchemy.keka.com?code=...&state=...)">
-  <button onclick="completeAuth()">Complete Setup</button>
   <div id="msg"></div>
   <script>
+    function extractParams(raw) {{
+      // Try various formats: full URL, URL without scheme, raw query string
+      var attempts = [raw, 'https://' + raw, 'https://x.x/?' + raw.replace(/^[?&]/, '')];
+      for (var i = 0; i < attempts.length; i++) {{
+        try {{
+          var p = new URL(attempts[i]);
+          var code = p.searchParams.get('code') || p.searchParams.get('authorization_code');
+          var state = p.searchParams.get('state');
+          if (code && state) return {{code: code, state: state}};
+        }} catch(e) {{}}
+      }}
+      return null;
+    }}
     function completeAuth() {{
       var raw = document.getElementById('redirectUrl').value.trim();
       var msg = document.getElementById('msg');
       if (!raw) {{ msg.textContent = 'Please paste the redirect URL first.'; return; }}
-      try {{
-        var parsed = new URL(raw);
-        var code = parsed.searchParams.get('code') || parsed.searchParams.get('authorization_code');
-        var state = parsed.searchParams.get('state');
-        if (!code || !state) {{
-          msg.textContent = 'Could not find code or state in the URL. Make sure you copied the full URL from the address bar.';
-          return;
-        }}
-        msg.textContent = 'Exchanging code for tokens...';
-        fetch('{callback_base}?action=oauth-callback&code=' + encodeURIComponent(code) + '&state=' + encodeURIComponent(state))
-          .then(function(r) {{ return r.text(); }})
-          .then(function(t) {{
-            msg.textContent = t;
-            if (t.toLowerCase().indexOf('complete') !== -1) {{
-              msg.textContent += ' — You can now check /api/cron?action=status to confirm.';
-            }}
-          }})
-          .catch(function(err) {{ msg.textContent = 'Request failed: ' + err; }});
-      }} catch(e) {{
-        msg.textContent = 'Invalid URL. Please paste the full redirect URL.';
+      var params = extractParams(raw);
+      if (!params) {{
+        msg.textContent = 'Could not find code and state in what you pasted.\\nMake sure you copied the full URL from the browser address bar after logging in to Keka.\\nIt should look like: https://alchemy.keka.com/?code=...&state=...';
+        return;
       }}
+      msg.textContent = 'Exchanging code for tokens...';
+      fetch('{callback_base}?action=oauth-callback&code=' + encodeURIComponent(params.code) + '&state=' + encodeURIComponent(params.state))
+        .then(function(r) {{ return r.text(); }})
+        .then(function(t) {{
+          if (t.toLowerCase().indexOf('complete') !== -1) {{
+            msg.textContent = '\\u2705 ' + t + '\\nTokens saved. Click Check Status to verify, then cron jobs will work automatically.';
+          }} else {{
+            msg.textContent = '\\u274C ' + t + '\\nThe code may have expired (>60s). Go back to Step 1 and try again immediately after login.';
+          }}
+        }})
+        .catch(function(err) {{ msg.textContent = 'Request failed: ' + err; }});
+    }}
+    function checkStatus() {{
+      var msg = document.getElementById('msg');
+      msg.textContent = 'Checking...';
+      fetch('{callback_base}?action=status')
+        .then(function(r) {{ return r.text(); }})
+        .then(function(t) {{ msg.textContent = t; }})
+        .catch(function(err) {{ msg.textContent = 'Error: ' + err; }});
     }}
   </script>
 </body>
