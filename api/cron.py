@@ -86,10 +86,79 @@ class handler(BaseHTTPRequestHandler):
         elif action == 'auth-auto':
             keka = KekaAttendance()
             try:
-                auth_url, _ = keka.create_oauth_bootstrap(self._auth_auto_redirect_uri(keka))
-                self.send_response(302)
-                self.send_header('Location', auth_url)
+                # Use the whitelisted static redirect URI so Keka doesn't reject the request.
+                # After login, Keka redirects to that URI with code+state; the user pastes
+                # that URL back into the form below and JS calls our oauth-callback handler.
+                redirect_uri = self._oauth_redirect_uri(keka)
+                auth_url, _ = keka.create_oauth_bootstrap(redirect_uri)
+                callback_base = f"{self.headers.get('x-forwarded-proto','https')}://{self.headers.get('host','')}/api/cron"
+                html = f"""<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>Keka Auth Setup</title>
+  <style>
+    body{{font-family:sans-serif;max-width:700px;margin:40px auto;padding:0 16px}}
+    input{{width:100%;box-sizing:border-box;padding:8px;font-size:14px;margin:8px 0}}
+    button{{padding:10px 20px;font-size:14px;cursor:pointer}}
+    #msg{{margin-top:12px;font-weight:bold}}
+    .step{{margin:16px 0}}
+  </style>
+</head>
+<body>
+  <h2>Keka Authentication Setup</h2>
+  <div class="step">
+    <strong>Step 1:</strong>
+    <a href="{auth_url}" target="_blank" rel="noopener">Open Keka Login &rarr;</a>
+    (opens in a new tab)
+  </div>
+  <div class="step">
+    <strong>Step 2:</strong> Log in with your Keka credentials.
+    After login, your browser will be redirected to a URL starting with
+    <code>{redirect_uri}</code>.
+    The page may look blank or show an error &mdash; that is expected.
+    <strong>Copy the full URL from your browser address bar.</strong>
+  </div>
+  <div class="step">
+    <strong>Step 3:</strong> Paste the full redirect URL below and click <em>Complete Setup</em>.
+  </div>
+  <input type="text" id="redirectUrl" placeholder="Paste the full redirect URL here (e.g. https://alchemy.keka.com?code=...&state=...)">
+  <button onclick="completeAuth()">Complete Setup</button>
+  <div id="msg"></div>
+  <script>
+    function completeAuth() {{
+      var raw = document.getElementById('redirectUrl').value.trim();
+      var msg = document.getElementById('msg');
+      if (!raw) {{ msg.textContent = 'Please paste the redirect URL first.'; return; }}
+      try {{
+        var parsed = new URL(raw);
+        var code = parsed.searchParams.get('code') || parsed.searchParams.get('authorization_code');
+        var state = parsed.searchParams.get('state');
+        if (!code || !state) {{
+          msg.textContent = 'Could not find code or state in the URL. Make sure you copied the full URL from the address bar.';
+          return;
+        }}
+        msg.textContent = 'Exchanging code for tokens...';
+        fetch('{callback_base}?action=oauth-callback&code=' + encodeURIComponent(code) + '&state=' + encodeURIComponent(state))
+          .then(function(r) {{ return r.text(); }})
+          .then(function(t) {{
+            msg.textContent = t;
+            if (t.toLowerCase().indexOf('complete') !== -1) {{
+              msg.textContent += ' — You can now check /api/cron?action=status to confirm.';
+            }}
+          }})
+          .catch(function(err) {{ msg.textContent = 'Request failed: ' + err; }});
+      }} catch(e) {{
+        msg.textContent = 'Invalid URL. Please paste the full redirect URL.';
+      }}
+    }}
+  </script>
+</body>
+</html>"""
+                self.send_response(200)
+                self.send_header('Content-type', 'text/html; charset=utf-8')
                 self.end_headers()
+                self.wfile.write(html.encode('utf-8'))
             except Exception as e:
                 self.send_response(500)
                 self.send_header('Content-type', 'text/plain')
