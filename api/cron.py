@@ -59,6 +59,14 @@ class handler(BaseHTTPRequestHandler):
         elif action == 'refresh':
             success = run_token_refresh()
             message = "Token Refresh Attempted"
+        elif action == 'force-refresh':
+            keka = KekaAttendance()
+            if keka.load_tokens():
+                success = keka.refresh_access_token()
+                message = "Force Token Refresh"
+            else:
+                success = False
+                message = "Force Token Refresh Failed — no tokens loaded"
         elif action == 'status':
             keka = KekaAttendance()
             if keka.load_tokens():
@@ -122,6 +130,9 @@ class handler(BaseHTTPRequestHandler):
     button{{padding:11px 22px;font-size:14px;cursor:pointer;border:none;border-radius:6px;background:#0070f3;color:#fff}}
     button.sec{{background:#f0f0f0;color:#333}}
     button.danger{{background:#fff0f0;color:#cf222e;border:1px solid #fcc}}
+    button.green{{background:#1a7f37;color:#fff}}
+    button.orange{{background:#f57c00;color:#fff}}
+    button:disabled{{opacity:.5;cursor:not-allowed}}
     #status{{margin-top:14px;font-size:15px;font-weight:600;min-height:22px}}
     textarea{{width:100%;box-sizing:border-box;padding:8px;font-size:13px;margin:10px 0 6px;border:1px solid #ccc;border-radius:6px}}
     .dot{{display:inline-block;width:9px;height:9px;border-radius:50%;background:#ccc;margin-right:6px;vertical-align:middle}}
@@ -144,6 +155,17 @@ class handler(BaseHTTPRequestHandler):
       <button class="danger" onclick="clearTokens()">&#x1F5D1; Clear Tokens</button>
     </div>
     <div id="status"><span class="dot" id="dot"></span><span id="statusText">Ready.</span></div>
+  </div>
+
+  <div class="card">
+    <strong>Manual Actions</strong><br>
+    <small>Trigger clock-in, clock-out, or force a token refresh at any time.</small>
+    <div class="row">
+      <button class="green" id="btnIn" onclick="runAction('in', this)">&#x23F0; Clock In</button>
+      <button class="orange" id="btnOut" onclick="runAction('out', this)">&#x23F1; Clock Out</button>
+      <button class="sec" id="btnRefresh" onclick="runAction('force-refresh', this)">&#x1F504; Force Refresh Token</button>
+    </div>
+    <div id="actionMsg" style="margin-top:10px;font-weight:600;min-height:20px"></div>
   </div>
 
   <div class="card">
@@ -186,6 +208,22 @@ class handler(BaseHTTPRequestHandler):
         .then(function(r) {{ return r.text(); }})
         .then(function(t) {{ setStatus(t, ''); done = false; }})
         .catch(function(e) {{ setStatus('Error: ' + e, 'err'); }});
+    }}
+
+    function runAction(action, btn) {{
+      var msg = document.getElementById('actionMsg');
+      btn.disabled = true;
+      msg.textContent = 'Running\u2026';
+      fetch(BASE + '?action=' + action)
+        .then(function(r) {{ return r.text(); }})
+        .then(function(t) {{
+          var ok = t.toLowerCase().indexOf('fail') === -1 && t.toLowerCase().indexOf('error') === -1;
+          msg.style.color = ok ? '#1a7f37' : '#cf222e';
+          msg.textContent = (ok ? '\u2705 ' : '\u274C ') + t;
+          btn.disabled = false;
+          if (action === 'force-refresh') checkNow();
+        }})
+        .catch(function(e) {{ msg.style.color = '#cf222e'; msg.textContent = 'Error: ' + e; btn.disabled = false; }});
     }}
 
     function extractCode(raw) {{
@@ -339,7 +377,7 @@ class handler(BaseHTTPRequestHandler):
 
         if not action:
             self.wfile.write(
-                b"Available actions: in, out, status, auth-auto, auth-auto-static, auth-start, auth-url, oauth-callback\n"
+                b"Available actions: in, out, refresh, force-refresh, status, auth-auto, auth-auto-static, auth-start, auth-url, oauth-callback\n"
             )
             return
 
