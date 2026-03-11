@@ -1,5 +1,5 @@
 from http.server import BaseHTTPRequestHandler
-from urllib.parse import urlparse, parse_qs
+from urllib.parse import urlparse, parse_qs, urlencode, urljoin
 import os
 import sys
 import time
@@ -9,32 +9,39 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from keka import KekaAttendance, run_clock_in, run_clock_out, run_token_refresh
 
+
+def _html_result(ok, message):
+    icon = "&#x2705;" if ok else "&#x274C;"
+    color = "#1a7f37" if ok else "#cf222e"
+    extra = "<p>You can close this tab.</p><script>setTimeout(function(){window.close();},3000);</script>" if ok else ""
+    return f"""<!DOCTYPE html><html><head><meta charset="utf-8"><title>Keka Auth</title>
+<style>body{{font-family:sans-serif;display:flex;align-items:center;justify-content:center;height:80vh;margin:0}}
+.box{{text-align:center;padding:40px;border-radius:12px;border:2px solid {color};max-width:480px}}
+h2{{color:{color}}} p{{color:#555}}</style></head>
+<body><div class="box"><h2>{icon} {message}</h2>{extra}</div></body></html>"""
+
 class handler(BaseHTTPRequestHandler):
-    def _callback_url(self):
+    def _base_url(self):
         proto = self.headers.get('x-forwarded-proto', 'https')
         host = self.headers.get('host', '')
-        return f"{proto}://{host}/api/cron?action=oauth-callback"
+        return f"{proto}://{host}"
+
+    def _callback_url(self):
+        return f"{self._base_url()}/api/cron?action=oauth-callback"
+
+    def _callback_url_with_verifier(self, verifier):
+        """Embed verifier in redirect_uri so Keka redirects straight to our handler."""
+        return f"{self._base_url()}/api/cron?action=oauth-callback&verifier={verifier}"
 
     def _oauth_redirect_uri(self, keka):
         """Use provider-safe redirect by default; dynamic callback only when explicitly enabled."""
         use_dynamic = os.environ.get('KEKA_USE_DYNAMIC_CALLBACK', '').lower() == 'true'
         configured = (keka.redirect_uri or '').strip()
-
         if use_dynamic:
             return self._callback_url()
-
-        # Default behavior: trust configured redirect URI to avoid provider whitelist errors.
         if configured:
             return configured
-
-        # Final fallback
         return 'https://alchemy.keka.com'
-
-    def _auth_auto_redirect_uri(self, keka):
-        """auth-auto should try to complete setup, so prefer callback URL unless explicitly overridden."""
-        if os.environ.get('KEKA_AUTH_AUTO_USE_STATIC', '').lower() == 'true':
-            return self._oauth_redirect_uri(keka)
-        return self._callback_url()
 
     def do_GET(self):
         query = parse_qs(urlparse(self.path).query)
@@ -85,94 +92,142 @@ class handler(BaseHTTPRequestHandler):
         elif action == 'auth-auto':
             keka = KekaAttendance()
             try:
-                redirect_uri = self._oauth_redirect_uri(keka)
-                auth_url, _, code_verifier, redir = keka.create_oauth_bootstrap(redirect_uri)
-                proto = self.headers.get('x-forwarded-proto', 'https')
-                host = self.headers.get('host', '')
-                callback_base = f"{proto}://{host}/api/cron" if host else '/api/cron'
-                # code_verifier is baked into the page JS — no server-side storage needed
+                # Generate verifier first, embed it in redirect_uri, then build auth_url
+                # using that same verifier so the PKCE pair stays consistent.
+                _, _, code_verifier, _ = keka.create_oauth_bootstrap('placeholder')
+                auto_redirect_uri = self._callback_url_with_verifier(code_verifier)
+                auth_url, _, _, _ = keka.create_oauth_bootstrap(auto_redirect_uri, code_verifier=code_verifier)
+
+                base = f"{self._base_url()}/api/cron"
                 html = f"""<!DOCTYPE html>
 <html>
 <head>
   <meta charset="utf-8">
   <title>Keka Auth Setup</title>
   <style>
-    body{{font-family:sans-serif;max-width:700px;margin:40px auto;padding:0 16px}}
-    textarea{{width:100%;box-sizing:border-box;padding:8px;font-size:14px;margin:8px 0}}
-    button{{padding:10px 20px;font-size:14px;cursor:pointer;margin-right:8px}}
-    #msg{{margin-top:12px;font-weight:bold;white-space:pre-wrap}}
-    .step{{margin:18px 0}}
-    code{{background:#f4f4f4;padding:2px 5px;border-radius:3px;font-size:13px}}
-    .tip{{color:#666;font-size:13px;margin-top:4px}}
+    body{{font-family:sans-serif;max-width:640px;margin:60px auto;padding:0 20px;color:#333}}
+    h2{{margin-bottom:4px}}
+    .sub{{color:#666;margin-bottom:32px;font-size:14px}}
+    .card{{border:1px solid #ddd;border-radius:10px;padding:24px;margin-bottom:20px}}
+    button{{padding:12px 28px;font-size:15px;cursor:pointer;border:none;border-radius:6px;background:#0070f3;color:#fff;margin-right:10px}}
+    button:disabled{{background:#aaa;cursor:default}}
+    button.sec{{background:#f0f0f0;color:#333}}
+    #status{{margin-top:20px;font-size:15px;font-weight:600;min-height:24px}}
+    #fallback{{display:none;margin-top:20px}}
+    textarea{{width:100%;box-sizing:border-box;padding:8px;font-size:13px;margin:8px 0;border:1px solid #ccc;border-radius:6px}}
+    .dot{{display:inline-block;width:10px;height:10px;border-radius:50%;background:#ccc;margin-right:6px}}
+    .dot.spin{{background:#0070f3;animation:pulse 1s infinite}}
+    .dot.ok{{background:#1a7f37}} .dot.err{{background:#cf222e}}
+    @keyframes pulse{{0%,100%{{opacity:1}}50%{{opacity:.4}}}}
+    code{{background:#f4f4f4;padding:2px 5px;border-radius:4px;font-size:12px}}
   </style>
 </head>
 <body>
-  <h2>Keka Authentication Setup</h2>
-  <div class="step">
-    <strong>Step 1:</strong>
-    <a href="{auth_url}" target="_blank" rel="noopener">&#x1F517; Open Keka Login</a>
-    &nbsp;(opens in a new tab — <strong>do not close or refresh this page</strong>)
+  <h2>Keka Auth Setup</h2>
+  <p class="sub">Automatic mode — just log in and this page handles the rest.</p>
+
+  <div class="card">
+    <strong>Step 1 — Log in</strong><br><br>
+    <button id="loginBtn" onclick="openLogin()">&#x1F517; Open Keka Login</button>
+    <button class="sec" onclick="checkNow()">Check Status</button>
+    <div id="status"><span class="dot" id="dot"></span><span id="statusText">Click the button above to begin.</span></div>
   </div>
-  <div class="step">
-    <strong>Step 2:</strong> Log in with your Keka credentials.<br>
-    After login, your browser will redirect to <code>{redir or 'alchemy.keka.com'}</code>.<br>
-    The page will look blank or show an error — that is normal.<br>
-    <strong>Copy the entire URL from your browser address bar.</strong>
+
+  <div id="fallback" class="card">
+    <strong>Manual fallback</strong> — if the popup was blocked or login went to a different tab:<br>
+    <small>Copy the full URL from your browser address bar after logging in (the one with <code>?code=...</code>) and paste it below.</small>
+    <textarea id="redirectUrl" rows="2" placeholder="https://alchemy.keka.com/?code=..."></textarea>
+    <button onclick="manualComplete()">Complete Setup</button>
+    <div id="fallbackMsg" style="margin-top:8px;font-weight:600"></div>
   </div>
-  <div class="step">
-    <strong>Step 3:</strong> Paste the URL below and click <em>Complete Setup</em> immediately.
-    <textarea id="redirectUrl" rows="3" placeholder="Paste full redirect URL here e.g. https://alchemy.keka.com/?code=...&state=..."></textarea>
-    <button onclick="completeAuth()">Complete Setup</button>
-    <button onclick="checkStatus()">Check Status</button>
-  </div>
-  <div id="msg"></div>
+
   <script>
     var CODE_VERIFIER = {repr(code_verifier)};
-    var REDIRECT_URI = {repr(redir or '')};
+    var AUTH_URL = {repr(auth_url)};
+    var BASE = {repr(base)};
+    var AUTO_REDIRECT_URI = {repr(auto_redirect_uri)};
+    var pollTimer = null;
+    var popup = null;
+    var done = false;
+
+    function setStatus(text, state) {{
+      document.getElementById('statusText').textContent = text;
+      var d = document.getElementById('dot');
+      d.className = 'dot' + (state === 'spin' ? ' spin' : state === 'ok' ? ' ok' : state === 'err' ? ' err' : '');
+    }}
+
+    function openLogin() {{
+      popup = window.open(AUTH_URL, 'kekaLogin', 'width=520,height=680,left=200,top=100');
+      setStatus('Waiting for login\u2026', 'spin');
+      document.getElementById('loginBtn').disabled = true;
+      // Show fallback after 5s in case popup was blocked
+      setTimeout(function() {{
+        if (!done) document.getElementById('fallback').style.display = 'block';
+      }}, 5000);
+      startPolling();
+    }}
+
+    function startPolling() {{
+      if (pollTimer) return;
+      pollTimer = setInterval(function() {{
+        fetch(BASE + '?action=status')
+          .then(function(r) {{ return r.text(); }})
+          .then(function(t) {{
+            if (t.indexOf('loaded=True') !== -1) {{
+              clearInterval(pollTimer); pollTimer = null;
+              done = true;
+              setStatus('\u2705 Authentication complete! Tokens saved. Cron jobs will run automatically.', 'ok');
+              document.getElementById('fallback').style.display = 'none';
+              if (popup && !popup.closed) popup.close();
+            }}
+          }})
+          .catch(function() {{}});
+      }}, 2000);
+    }}
+
+    function checkNow() {{
+      fetch(BASE + '?action=status')
+        .then(function(r) {{ return r.text(); }})
+        .then(function(t) {{ setStatus(t, t.indexOf('loaded=True') !== -1 ? 'ok' : ''); }})
+        .catch(function(e) {{ setStatus('Error: ' + e, 'err'); }});
+    }}
+
     function extractCode(raw) {{
-      var sanitized = raw.replace(/ /g, '%20');
-      var attempts = [sanitized, 'https://' + sanitized, 'https://x.x/?' + sanitized.replace(/^[?&]/, '')];
-      for (var i = 0; i < attempts.length; i++) {{
+      var s = raw.trim().replace(/ /g, '%20');
+      var tries = [s, 'https://' + s, 'https://x.x/?' + s.replace(/^[?&]/, '')];
+      for (var i = 0; i < tries.length; i++) {{
         try {{
-          var p = new URL(attempts[i]);
-          var code = p.searchParams.get('code') || p.searchParams.get('authorization_code');
-          if (code) return code;
+          var p = new URL(tries[i]);
+          var c = p.searchParams.get('code') || p.searchParams.get('authorization_code');
+          if (c) return c;
         }} catch(e) {{}}
       }}
       return null;
     }}
-    function completeAuth() {{
-      var raw = document.getElementById('redirectUrl').value.trim();
-      var msg = document.getElementById('msg');
-      if (!raw) {{ msg.textContent = 'Please paste the redirect URL first.'; return; }}
+
+    function manualComplete() {{
+      var raw = document.getElementById('redirectUrl').value;
+      var msg = document.getElementById('fallbackMsg');
       var code = extractCode(raw);
-      if (!code) {{
-        msg.textContent = 'Could not find the authorization code in the URL.\\nMake sure you copied the full URL from the browser address bar.';
-        return;
-      }}
-      msg.textContent = 'Exchanging code for tokens...';
-      var url = '{callback_base}?action=oauth-callback'
+      if (!code) {{ msg.textContent = '\u274C Could not find code in that URL.'; return; }}
+      msg.textContent = 'Exchanging\u2026';
+      var url = BASE + '?action=oauth-callback'
         + '&code=' + encodeURIComponent(code)
         + '&verifier=' + encodeURIComponent(CODE_VERIFIER)
-        + '&redirect_uri=' + encodeURIComponent(REDIRECT_URI);
+        + '&redirect_uri=' + encodeURIComponent(AUTO_REDIRECT_URI);
       fetch(url)
         .then(function(r) {{ return r.text(); }})
         .then(function(t) {{
           if (t.toLowerCase().indexOf('complete') !== -1) {{
-            msg.textContent = '\\u2705 ' + t + '\\nTokens saved. Cron jobs will now work automatically.';
+            msg.textContent = '\u2705 ' + t;
+            setStatus('\u2705 Authentication complete! Cron jobs will run automatically.', 'ok');
+            done = true;
+            if (pollTimer) {{ clearInterval(pollTimer); pollTimer = null; }}
           }} else {{
-            msg.textContent = '\\u274C ' + t;
+            msg.textContent = '\u274C ' + t;
           }}
         }})
-        .catch(function(err) {{ msg.textContent = 'Request failed: ' + err; }});
-    }}
-    function checkStatus() {{
-      var msg = document.getElementById('msg');
-      msg.textContent = 'Checking...';
-      fetch('{callback_base}?action=status')
-        .then(function(r) {{ return r.text(); }})
-        .then(function(t) {{ msg.textContent = t; }})
-        .catch(function(err) {{ msg.textContent = 'Error: ' + err; }});
+        .catch(function(e) {{ msg.textContent = 'Error: ' + e; }});
     }}
   </script>
 </body>
@@ -225,13 +280,22 @@ class handler(BaseHTTPRequestHandler):
                 self.wfile.write(f"Failed to start oauth: {e}".encode('utf-8'))
             return
         elif action == 'oauth-callback':
+            # Detect if this is a direct browser visit (Keka auto-redirect) vs a fetch() call
+            accept = self.headers.get('Accept', '')
+            is_browser = 'text/html' in accept
+
             if 'error' in query:
                 err = query.get('error', ['unknown_error'])[0]
                 desc = query.get('error_description', [''])[0]
                 self.send_response(400)
-                self.send_header('Content-type', 'text/plain')
-                self.end_headers()
-                self.wfile.write(f"OAuth rejected by provider: {err} {desc}".encode('utf-8'))
+                if is_browser:
+                    self.send_header('Content-type', 'text/html; charset=utf-8')
+                    self.end_headers()
+                    self.wfile.write(_html_result(False, f"OAuth rejected: {err} — {desc}").encode('utf-8'))
+                else:
+                    self.send_header('Content-type', 'text/plain')
+                    self.end_headers()
+                    self.wfile.write(f"OAuth rejected by provider: {err} {desc}".encode('utf-8'))
                 return
 
             code = query.get('code', [''])[0] or query.get('authorization_code', [''])[0]
@@ -239,18 +303,36 @@ class handler(BaseHTTPRequestHandler):
             redirect_uri = query.get('redirect_uri', [''])[0] or None
             if not code or not verifier:
                 self.send_response(400)
-                self.send_header('Content-type', 'text/plain')
-                self.end_headers()
-                self.wfile.write(b"Missing code or verifier parameter.")
+                if is_browser:
+                    self.send_header('Content-type', 'text/html; charset=utf-8')
+                    self.end_headers()
+                    self.wfile.write(_html_result(False, "Missing code or verifier. Try auth-auto again.").encode('utf-8'))
+                else:
+                    self.send_header('Content-type', 'text/plain')
+                    self.end_headers()
+                    self.wfile.write(b"Missing code or verifier parameter.")
                 return
+
+            # Reconstruct the redirect_uri that was registered with Keka.
+            # When verifier is embedded in the redirect_uri, Keka echoes the base URI back;
+            # we rebuild it so the token exchange matches exactly what was sent.
+            if not redirect_uri and verifier:
+                redirect_uri = self._callback_url_with_verifier(verifier)
+
             keka = KekaAttendance()
             result = keka.exchange_callback_code(code, verifier, redirect_uri=redirect_uri)
             ok = result is True
             self.send_response(200 if ok else 500)
-            self.send_header('Content-type', 'text/plain')
-            self.end_headers()
-            msg = "OAuth setup complete" if ok else f"OAuth setup failed: {result}"
-            self.wfile.write(msg.encode('utf-8'))
+            if is_browser:
+                self.send_header('Content-type', 'text/html; charset=utf-8')
+                self.end_headers()
+                msg = "Authentication complete! Tokens saved. You can close this tab." if ok else f"Authentication failed: {result}"
+                self.wfile.write(_html_result(ok, msg).encode('utf-8'))
+            else:
+                self.send_header('Content-type', 'text/plain')
+                self.end_headers()
+                msg = "OAuth setup complete" if ok else f"OAuth setup failed: {result}"
+                self.wfile.write(msg.encode('utf-8'))
             return
         
         self.send_response(200)
