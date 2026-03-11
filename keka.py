@@ -282,7 +282,7 @@ class KekaAttendance:
             'token_expiry': self.token_expiry,
             'last_refresh_time': self.last_refresh_time
         }
-        
+
         if kv:
             try:
                 kv.set(REDIS_KEY, json.dumps(tokens))
@@ -293,6 +293,26 @@ class KekaAttendance:
             with open(TOKEN_FILE, 'w') as f:
                 json.dump(tokens, f)
             logging.info("Tokens saved to file")
+
+    def clear_tokens(self):
+        """Delete stored tokens from Redis and file."""
+        cleared = []
+        if kv:
+            try:
+                kv.delete(REDIS_KEY)
+                cleared.append('redis')
+            except Exception as e:
+                logging.warning(f"Failed to clear Redis tokens: {e}")
+        try:
+            import os as _os
+            _os.remove(TOKEN_FILE)
+            cleared.append('file')
+        except FileNotFoundError:
+            pass
+        except Exception as e:
+            logging.warning(f"Failed to clear token file: {e}")
+        self.access_token = self.refresh_token = self.token_expiry = self.last_refresh_time = None
+        return cleared
     
     def load_tokens(self):
         """Load tokens from Redis (if available) or file"""
