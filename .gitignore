@@ -4,3 +4,4 @@ keka_tokens.json
 .env.local
 .env.*.local
 # .env.example should be committed (it's a template)
+__pycache__/
