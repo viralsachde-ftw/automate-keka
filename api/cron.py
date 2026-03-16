@@ -78,10 +78,12 @@ h2{color:#cf222e}p{color:#555}</style></head>
         query = parse_qs(urlparse(self.path).query)
         action = query.get('action', [''])[0]
 
+        # Actions called exclusively by Vercel cron scheduler — no human-facing
+        # UI, no secrets exposed, safe to leave unprotected.
+        CRON_ACTIONS = {'in', 'out', 'refresh'}
         # oauth-callback is exempt: Keka redirects here with ?code= and we can't
-        # append a secret to the redirect_uri. It's safe because it requires a
-        # valid code+verifier pair to do anything useful.
-        if action != 'oauth-callback' and not self._is_authorized(query):
+        # append a secret to the redirect_uri. Safe because it needs valid code+verifier.
+        if action not in CRON_ACTIONS and action != 'oauth-callback' and not self._is_authorized(query):
             self._send_unauthorized()
             return
 
