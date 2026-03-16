@@ -43,10 +43,48 @@ class handler(BaseHTTPRequestHandler):
             return configured
         return 'https://alchemy.keka.com'
 
+    def _is_authorized(self, query):
+        """Return True if the request is authorized.
+        Passes if:
+          - KEKA_SECRET env var is not set (no protection configured)
+          - Vercel cron Authorization header matches CRON_SECRET (automated crons)
+          - ?secret= query param matches KEKA_SECRET (user with bookmarked URL)
+        """
+        secret = os.environ.get('KEKA_SECRET', '').strip()
+        if not secret:
+            return True  # no protection configured
+
+        # Vercel injects Authorization: Bearer <CRON_SECRET> on scheduled cron calls
+        cron_secret = os.environ.get('CRON_SECRET', '').strip()
+        auth_header = self.headers.get('Authorization', '')
+        if cron_secret and auth_header == f'Bearer {cron_secret}':
+            return True
+
+        provided = query.get('secret', [''])[0]
+        return provided == secret
+
+    def _send_unauthorized(self):
+        self.send_response(401)
+        self.send_header('Content-type', 'text/html; charset=utf-8')
+        self.end_headers()
+        self.wfile.write(b"""<!DOCTYPE html><html><head><meta charset="utf-8"><title>401</title>
+<style>body{font-family:sans-serif;display:flex;align-items:center;justify-content:center;height:80vh;margin:0}
+.box{text-align:center;padding:40px;border-radius:12px;border:2px solid #cf222e;max-width:400px}
+h2{color:#cf222e}p{color:#555}</style></head>
+<body><div class="box"><h2>&#x1F512; Unauthorized</h2>
+<p>Missing or incorrect secret. Add <code>?secret=...</code> to the URL.</p></div></body></html>""")
+
     def do_GET(self):
         query = parse_qs(urlparse(self.path).query)
         action = query.get('action', [''])[0]
-        
+
+        # oauth-callback is exempt: Keka redirects here with ?code= and we can't
+        # append a secret to the redirect_uri. It's safe because it requires a
+        # valid code+verifier pair to do anything useful.
+        if action != 'oauth-callback' and not self._is_authorized(query):
+            self._send_unauthorized()
+            return
+
         success = False
         message = "No action specified"
         
@@ -116,6 +154,10 @@ class handler(BaseHTTPRequestHandler):
                 auto_redirect_uri = redirect_uri  # used in manualComplete fetch
 
                 base = f"{self._base_url()}/api/cron"
+                # Forward secret into page so all JS fetch calls include it
+                _page_secret = query.get('secret', [''])[0]
+                if _page_secret:
+                    base += f"?secret={_page_secret}"
                 html = f"""<!DOCTYPE html>
 <html>
 <head>
@@ -181,6 +223,7 @@ class handler(BaseHTTPRequestHandler):
     var CODE_VERIFIER = {repr(code_verifier)};
     var AUTH_URL = {repr(auth_url)};
     var BASE = {repr(base)};
+    var SEP = BASE.indexOf('?') !== -1 ? '&' : '?';
     var REDIRECT_URI = {repr(auto_redirect_uri)};
     var done = false;
 
@@ -196,7 +239,7 @@ class handler(BaseHTTPRequestHandler):
     }}
 
     function checkNow() {{
-      fetch(BASE + '?action=status')
+      fetch(BASE + SEP + 'action=status')
         .then(function(r) {{ return r.text(); }})
         .then(function(t) {{ setStatus(t, t.indexOf('loaded=True') !== -1 ? 'ok' : ''); }})
         .catch(function(e) {{ setStatus('Error: ' + e, 'err'); }});
@@ -204,7 +247,7 @@ class handler(BaseHTTPRequestHandler):
 
     function clearTokens() {{
       if (!confirm('Clear stored tokens?')) return;
-      fetch(BASE + '?action=clear-tokens')
+      fetch(BASE + SEP + 'action=clear-tokens')
         .then(function(r) {{ return r.text(); }})
         .then(function(t) {{ setStatus(t, ''); done = false; }})
         .catch(function(e) {{ setStatus('Error: ' + e, 'err'); }});
@@ -214,7 +257,7 @@ class handler(BaseHTTPRequestHandler):
       var msg = document.getElementById('actionMsg');
       btn.disabled = true;
       msg.textContent = 'Running\u2026';
-      fetch(BASE + '?action=' + action)
+      fetch(BASE + SEP + 'action=' + action)
         .then(function(r) {{ return r.text(); }})
         .then(function(t) {{
           var ok = t.toLowerCase().indexOf('fail') === -1 && t.toLowerCase().indexOf('error') === -1;
@@ -245,7 +288,7 @@ class handler(BaseHTTPRequestHandler):
       var code = extractCode(raw);
       if (!code) {{ msg.textContent = '\u274C Could not find code in that URL.'; return; }}
       msg.textContent = 'Exchanging\u2026';
-      var url = BASE + '?action=oauth-callback'
+      var url = BASE + SEP + 'action=oauth-callback'
         + '&code=' + encodeURIComponent(code)
         + '&verifier=' + encodeURIComponent(CODE_VERIFIER)
         + '&redirect_uri=' + encodeURIComponent(REDIRECT_URI);
