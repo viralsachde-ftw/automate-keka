@@ -311,6 +311,9 @@ h2{color:#cf222e}p{color:#555}</style></head>
     // Auto-check status on load
     checkNow();
   </script>
+  <footer style="text-align:center;margin-top:32px;color:#aaa;font-size:13px">
+    Made with &hearts; by Viral
+  </footer>
 </body>
 </html>"""
                 self.send_response(200)
