@@ -91,10 +91,12 @@ h2{color:#cf222e}p{color:#555}</style></head>
         message = "No action specified"
         
         if action == 'in':
-            success = run_clock_in()
+            forced = query.get('force', [''])[0] == '1'
+            success = run_clock_in(forced=forced)
             message = "Clock In Attempted"
         elif action == 'out':
-            success = run_clock_out()
+            forced = query.get('force', [''])[0] == '1'
+            success = run_clock_out(forced=forced)
             message = "Clock Out Attempted"
         elif action == 'refresh':
             success = run_token_refresh()
@@ -205,8 +207,8 @@ h2{color:#cf222e}p{color:#555}</style></head>
     <strong>Manual Actions</strong><br>
     <small>Trigger clock-in, clock-out, or force a token refresh at any time.</small>
     <div class="row">
-      <button class="green" id="btnIn" onclick="runAction('in', this)">&#x23F0; Clock In</button>
-      <button class="orange" id="btnOut" onclick="runAction('out', this)">&#x23F1; Clock Out</button>
+      <button class="green" id="btnIn" onclick="runAction('in&amp;force=1', this)">&#x23F0; Clock In</button>
+      <button class="orange" id="btnOut" onclick="runAction('out&amp;force=1', this)">&#x23F1; Clock Out</button>
       <button class="sec" id="btnRefresh" onclick="runAction('force-refresh', this)">&#x1F504; Force Refresh Token</button>
     </div>
     <div id="actionMsg" style="margin-top:10px;font-weight:600;min-height:20px"></div>
