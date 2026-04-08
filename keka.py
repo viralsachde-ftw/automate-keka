@@ -4,6 +4,7 @@ import time
 import base64
 import hashlib
 import secrets
+import random as _random_mod
 from datetime import datetime, timezone, timedelta
 from urllib.parse import urlencode, parse_qs
 import schedule
@@ -496,32 +497,55 @@ def is_weekday():
     """Check if today is a weekday in IST"""
     return datetime.now(IST).weekday() < 5  # Monday = 0, Friday = 4
 
-def run_clock_in():
-    """Executed by Cron"""
-    if is_weekday():
-        logging.info("Assuming weekday check passed (or forced). Attempting clock in...")
-        keka = KekaAttendance()
-        if keka.load_tokens():
-            return keka.clock_in()
-        else:
-            logging.error("No tokens found.")
-            return False
+def _is_in_random_window(window_key, start_h, start_m, end_h, end_m, step_min=5, tolerance_min=2):
+    """Return True if current IST time is near today's randomly-chosen slot in the window.
+
+    Uses the date (in IST) as a seed so the chosen slot is the same across all cron
+    invocations within a day but changes every day. window_key (0 for clock-in,
+    1 for clock-out) ensures the two windows pick independently.
+    """
+    now_ist = datetime.now(IST)
+    today_seed = int(now_ist.strftime('%Y%m%d')) * 10 + window_key
+    rng = _random_mod.Random(today_seed)
+    start_total = start_h * 60 + start_m
+    end_total = end_h * 60 + end_m
+    slots = list(range(start_total, end_total + 1, step_min))
+    chosen = rng.choice(slots)
+    current = now_ist.hour * 60 + now_ist.minute
+    in_window = abs(current - chosen) <= tolerance_min
+    if not in_window:
+        chosen_hhmm = f"{chosen // 60:02d}:{chosen % 60:02d}"
+        logging.info(f"Random slot for today: {chosen_hhmm} IST — current {now_ist.strftime('%H:%M')} IST is not the slot. Skipping.")
+    return in_window
+
+def run_clock_in(forced=False):
+    """Executed by Cron or manual button. forced=True bypasses weekday and time-window checks."""
+    if not forced and not is_weekday():
+        logging.info("Not a weekday. Skipping clock-in.")
+        return False
+    if not forced and not _is_in_random_window(0, 9, 0, 9, 30):
+        return True  # Not a failure — just not our chosen slot for today
+    logging.info("Attempting clock in...")
+    keka = KekaAttendance()
+    if keka.load_tokens():
+        return keka.clock_in()
     else:
-        logging.info("Not a weekday. Skipping.")
+        logging.error("No tokens found.")
         return False
 
-def run_clock_out():
-    """Executed by Cron"""
-    if is_weekday():
-        logging.info("Assuming weekday check passed (or forced). Attempting clock out...")
-        keka = KekaAttendance()
-        if keka.load_tokens():
-            return keka.clock_out()
-        else:
-            logging.error("No tokens found.")
-            return False
+def run_clock_out(forced=False):
+    """Executed by Cron or manual button. forced=True bypasses weekday and time-window checks."""
+    if not forced and not is_weekday():
+        logging.info("Not a weekday. Skipping clock-out.")
+        return False
+    if not forced and not _is_in_random_window(1, 18, 30, 19, 0):
+        return True  # Not a failure — just not our chosen slot for today
+    logging.info("Attempting clock out...")
+    keka = KekaAttendance()
+    if keka.load_tokens():
+        return keka.clock_out()
     else:
-        logging.info("Not a weekday. Skipping.")
+        logging.error("No tokens found.")
         return False
 
 def run_token_refresh():
