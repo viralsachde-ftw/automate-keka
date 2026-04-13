@@ -497,34 +497,69 @@ def is_weekday():
     """Check if today is a weekday in IST"""
     return datetime.now(IST).weekday() < 5  # Monday = 0, Friday = 4
 
-def _is_in_random_window(window_key, start_h, start_m, end_h, end_m, step_min=5, tolerance_min=2):
-    """Return True if current IST time is near today's randomly-chosen slot in the window.
+def _should_run_action(action_key, window_key, start_h, start_m, end_h, end_m, step_min=5):
+    """Decide if a clock action should fire now, handling Vercel Hobby plan delays.
 
-    Uses the date (in IST) as a seed so the chosen slot is the same across all cron
-    invocations within a day but changes every day. window_key (0 for clock-in,
-    1 for clock-out) ensures the two windows pick independently.
+    Hobby plan crons can fire up to ~1 hour late. Instead of requiring an exact
+    time match, we:
+      1. Pick a random slot within the window (date-seeded, same all day).
+      2. Fire if current IST time >= chosen slot (i.e. the moment has arrived or passed).
+      3. Use Redis SET NX (atomic set-if-not-exists) so only the FIRST delayed cron
+         that passes step 2 actually acts — all later duplicates skip.
+      4. Skip entirely if we are >90 min past the end of the window (something went
+         very wrong; better to miss than clock in/out hours late).
     """
     now_ist = datetime.now(IST)
-    today_seed = int(now_ist.strftime('%Y%m%d')) * 10 + window_key
-    rng = _random_mod.Random(today_seed)
+    today = int(now_ist.strftime('%Y%m%d'))
+
+    # Pick today's random slot
+    rng = _random_mod.Random(today * 10 + window_key)
     start_total = start_h * 60 + start_m
-    end_total = end_h * 60 + end_m
-    slots = list(range(start_total, end_total + 1, step_min))
+    end_total   = end_h   * 60 + end_m
+    slots  = list(range(start_total, end_total + 1, step_min))
     chosen = rng.choice(slots)
+    chosen_hhmm = f"{chosen // 60:02d}:{chosen % 60:02d}"
     current = now_ist.hour * 60 + now_ist.minute
-    in_window = abs(current - chosen) <= tolerance_min
-    if not in_window:
-        chosen_hhmm = f"{chosen // 60:02d}:{chosen % 60:02d}"
-        logging.info(f"Random slot for today: {chosen_hhmm} IST — current {now_ist.strftime('%H:%M')} IST is not the slot. Skipping.")
-    return in_window
+
+    logging.info(f"{action_key}: chosen slot {chosen_hhmm} IST, current {now_ist.strftime('%H:%M')} IST")
+
+    # Too early — a later cron will handle it
+    if current < chosen:
+        logging.info(f"{action_key}: before chosen slot, skipping.")
+        return False
+
+    # Way too late — skip rather than act hours after the window
+    if current > end_total + 90:
+        logging.info(f"{action_key}: >90 min past window end, skipping.")
+        return False
+
+    # Claim this action atomically via Redis so duplicate delayed crons don't double-fire
+    if kv:
+        done_key = f"keka_{action_key}_done"
+        try:
+            claimed = kv.set(done_key, str(today), nx=True, ex=86400)
+            if not claimed:
+                # Key already exists — check if it's from today
+                existing = kv.get(done_key)
+                if isinstance(existing, bytes):
+                    existing = existing.decode('utf-8')
+                if existing == str(today):
+                    logging.info(f"{action_key}: already done today, skipping.")
+                    return False
+                # Stale key from a previous day — overwrite and proceed
+                kv.set(done_key, str(today), ex=86400)
+        except Exception as e:
+            logging.warning(f"Redis claim check failed for {action_key}: {e}")
+
+    return True
 
 def run_clock_in(forced=False):
     """Executed by Cron or manual button. forced=True bypasses weekday and time-window checks."""
     if not forced and not is_weekday():
         logging.info("Not a weekday. Skipping clock-in.")
         return False
-    if not forced and not _is_in_random_window(0, 9, 0, 9, 30):
-        return True  # Not a failure — just not our chosen slot for today
+    if not forced and not _should_run_action('clock_in', 0, 9, 0, 9, 30):
+        return True  # Not a failure — just not time yet or already done
     logging.info("Attempting clock in...")
     keka = KekaAttendance()
     if keka.load_tokens():
@@ -538,8 +573,8 @@ def run_clock_out(forced=False):
     if not forced and not is_weekday():
         logging.info("Not a weekday. Skipping clock-out.")
         return False
-    if not forced and not _is_in_random_window(1, 18, 30, 19, 0):
-        return True  # Not a failure — just not our chosen slot for today
+    if not forced and not _should_run_action('clock_out', 1, 18, 30, 19, 0):
+        return True  # Not a failure — just not time yet or already done
     logging.info("Attempting clock out...")
     keka = KekaAttendance()
     if keka.load_tokens():
