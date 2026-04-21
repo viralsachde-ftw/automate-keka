@@ -92,11 +92,13 @@ h2{color:#cf222e}p{color:#555}</style></head>
         
         if action == 'in':
             forced = query.get('force', [''])[0] == '1'
-            success = run_clock_in(forced=forced)
+            slot   = query.get('slot',  [''])[0]
+            success = run_clock_in(forced=forced, slot=slot)
             message = "Clock In Attempted"
         elif action == 'out':
             forced = query.get('force', [''])[0] == '1'
-            success = run_clock_out(forced=forced)
+            slot   = query.get('slot',  [''])[0]
+            success = run_clock_out(forced=forced, slot=slot)
             message = "Clock Out Attempted"
         elif action == 'refresh':
             success = run_token_refresh()
