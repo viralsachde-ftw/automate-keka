@@ -568,18 +568,114 @@ def run_clock_in(forced=False, slot=None):
     logging.info("Attempting clock in...")
     keka = KekaAttendance()
     if keka.load_tokens():
-        return keka.clock_in()
+        result = keka.clock_in()
+        if result and kv:
+            try:
+                now_epoch = int(datetime.now(IST).timestamp())
+                kv.set('keka_clock_in_actual', str(now_epoch), ex=86400)
+                logging.info(f"Stored clock-in time: {datetime.now(IST).strftime('%H:%M')} IST")
+            except Exception as e:
+                logging.warning(f"Failed to store clock-in time: {e}")
+        return result
     else:
         logging.error("No tokens found.")
         return False
 
 def run_clock_out(forced=False, slot=None):
-    """Executed by Cron or manual button. forced=True bypasses weekday and time-window checks."""
+    """Executed by Cron or manual button. forced=True bypasses weekday and time-window checks.
+
+    Enforces strict >9h gap: clock-out won't fire until at least 9h05m after
+    the actual clock-in time stored in Redis. Every clock-out cron checks
+    whether both the random preferred time AND the 9h minimum have been reached;
+    the first cron past both thresholds claims via Redis NX.
+    """
     if not forced and not is_weekday():
         logging.info("Not a weekday. Skipping clock-out.")
         return False
-    if not forced and not _should_run_action('clock_out', 1, 18, 30, 19, 0, slot=slot):
-        return True  # Not a failure — just not the right slot or already done
+
+    now_ist = datetime.now(IST)
+    current = now_ist.hour * 60 + now_ist.minute
+    today = int(now_ist.strftime('%Y%m%d'))
+
+    if not forced:
+        # Already done today?
+        if kv:
+            done_key = 'keka_clock_out_done'
+            try:
+                existing = kv.get(done_key)
+                if existing:
+                    if isinstance(existing, bytes):
+                        existing = existing.decode('utf-8')
+                    if existing == str(today):
+                        logging.info("clock_out: already done today. Skipping.")
+                        return True
+            except Exception as e:
+                logging.warning(f"Redis dedup check failed: {e}")
+
+        # Pick today's random preferred time (18:30-19:00 IST, date-seeded)
+        rng = _random_mod.Random(today * 10 + 1)
+        preferred_slots = list(range(18 * 60 + 30, 19 * 60 + 1, 5))
+        random_time = rng.choice(preferred_slots)
+
+        # 9h05m enforcement: earliest allowed clock-out from actual clock-in
+        min_clockout = None
+        if kv:
+            try:
+                raw = kv.get('keka_clock_in_actual')
+                if raw:
+                    if isinstance(raw, bytes):
+                        raw = raw.decode('utf-8')
+                    clock_in_epoch = int(raw)
+                    clock_in_dt = datetime.fromtimestamp(clock_in_epoch, tz=IST)
+                    if clock_in_dt.date() == now_ist.date():
+                        min_out_dt = clock_in_dt + timedelta(hours=9, minutes=5)
+                        min_clockout = min_out_dt.hour * 60 + min_out_dt.minute
+                    else:
+                        logging.info("clock_out: stored clock-in is from a different day, ignoring 9h constraint")
+            except Exception as e:
+                logging.warning(f"Failed to read clock-in time: {e}")
+
+        effective_earliest = random_time
+        if min_clockout is not None and min_clockout > effective_earliest:
+            effective_earliest = min_clockout
+            logging.info(
+                f"clock_out: 9h enforcement pushed earliest from "
+                f"{random_time // 60:02d}:{random_time % 60:02d} to "
+                f"{effective_earliest // 60:02d}:{effective_earliest % 60:02d}"
+            )
+
+        min_str = f"{min_clockout // 60:02d}:{min_clockout % 60:02d}" if min_clockout is not None else "N/A"
+        logging.info(
+            f"clock_out: random={random_time // 60:02d}:{random_time % 60:02d}, "
+            f"9h_min={min_str}, effective={effective_earliest // 60:02d}:{effective_earliest % 60:02d}, "
+            f"now={current // 60:02d}:{current % 60:02d}"
+        )
+
+        if current < effective_earliest:
+            logging.info("clock_out: too early. Skipping.")
+            return True
+
+        # Safety: don't act if extremely late (>90 min past 19:30 IST)
+        if current > 19 * 60 + 30 + 90:
+            logging.info("clock_out: >90 min past extended window. Skipping.")
+            return False
+
+        # Atomically claim today's clock-out via Redis NX
+        if kv:
+            done_key = 'keka_clock_out_done'
+            try:
+                claimed = kv.set(done_key, str(today), nx=True, ex=86400)
+                if not claimed:
+                    existing = kv.get(done_key)
+                    if isinstance(existing, bytes):
+                        existing = existing.decode('utf-8')
+                    if existing == str(today):
+                        logging.info("clock_out: already claimed by another cron. Skipping.")
+                        return True
+                    kv.set(done_key, str(today), ex=86400)
+            except Exception as e:
+                logging.warning(f"Redis NX claim failed: {e}")
+
     logging.info("Attempting clock out...")
     keka = KekaAttendance()
     if keka.load_tokens():
