@@ -276,24 +276,26 @@ class KekaAttendance:
             return False
     
     def save_tokens(self):
-        """Save tokens to Redis (if available) or file"""
+        """Save tokens to Redis (if available) or file. Never raises — logs on failure."""
         tokens = {
             'access_token': self.access_token,
             'refresh_token': self.refresh_token,
             'token_expiry': self.token_expiry,
             'last_refresh_time': self.last_refresh_time
         }
-
         if kv:
             try:
                 kv.set(REDIS_KEY, json.dumps(tokens))
                 logging.info("Tokens saved to Redis")
+                return
             except Exception as e:
                 logging.error(f"Failed to save tokens to Redis: {e}")
-        else:
+        try:
             with open(TOKEN_FILE, 'w') as f:
                 json.dump(tokens, f)
             logging.info("Tokens saved to file")
+        except Exception as e:
+            logging.error(f"Failed to save tokens to file (read-only FS?): {e}")
 
     def clear_tokens(self):
         """Delete stored tokens from Redis and file."""
