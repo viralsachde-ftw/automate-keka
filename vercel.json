@@ -16,7 +16,13 @@
     {"path": "/api/cron?action=out&slot=1845","schedule": "15 13 * * 1-5"},
     {"path": "/api/cron?action=out&slot=1850","schedule": "20 13 * * 1-5"},
     {"path": "/api/cron?action=out&slot=1855","schedule": "25 13 * * 1-5"},
-    {"path": "/api/cron?action=out&slot=1900","schedule": "30 13 * * 1-5"}
+    {"path": "/api/cron?action=out&slot=1900","schedule": "30 13 * * 1-5"},
+    {"path": "/api/cron?action=out&slot=1905","schedule": "35 13 * * 1-5"},
+    {"path": "/api/cron?action=out&slot=1910","schedule": "40 13 * * 1-5"},
+    {"path": "/api/cron?action=out&slot=1915","schedule": "45 13 * * 1-5"},
+    {"path": "/api/cron?action=out&slot=1920","schedule": "50 13 * * 1-5"},
+    {"path": "/api/cron?action=out&slot=1925","schedule": "55 13 * * 1-5"},
+    {"path": "/api/cron?action=out&slot=1930","schedule": "0 14 * * 1-5"}
   ],
   "builds": [
     {
