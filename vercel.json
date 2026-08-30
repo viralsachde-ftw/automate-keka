@@ -38,6 +38,10 @@
   ],
   "routes": [
     {
+      "src": "/dashboard",
+      "dest": "api/cron.py?action=dashboard"
+    },
+    {
       "src": "/api/cron",
       "dest": "api/cron.py"
     }
