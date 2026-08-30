@@ -7,7 +7,9 @@ import time
 # Add parent directory to path so we can import keka
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from keka import KekaAttendance, run_clock_in, run_clock_out, run_token_refresh
+from keka import (KekaAttendance, run_clock_in, run_clock_out, run_token_refresh,
+                   get_today_schedule, extend_clock_out, add_exempt_date,
+                   remove_exempt_date, get_exempt_dates, HOLIDAYS)
 
 
 def _html_result(ok, message):
@@ -423,13 +425,242 @@ h2{color:#cf222e}p{color:#555}</style></head>
                 self.wfile.write(msg.encode('utf-8'))
             return
         
+        elif action == 'dashboard':
+            s = get_today_schedule()
+            exempt = get_exempt_dates()
+            base = f"{self._base_url()}/api/cron"
+            _ps = query.get('secret', [''])[0]
+            if _ps:
+                base += f"?secret={_ps}"
+            sep = '&' if '?' in base else '?'
+
+            if s['holiday_name']:
+                badge = '<span class="badge holiday">' + s["holiday_name"] + '</span>'
+            elif s['is_weekend']:
+                badge = '<span class="badge weekend">Weekend</span>'
+            else:
+                badge = '<span class="badge workday">Workday</span>'
+
+            ci_status = ''
+            if s['clock_in_done']:
+                ci_val = s['clock_in_actual'] or s['clock_in_planned']
+                ci_status = '<span class="val done">' + ci_val + '</span><span class="tag done">Done</span>'
+            else:
+                ci_status = '<span class="val pending">' + s["clock_in_planned"] + '</span><span class="tag pending">Pending</span>'
+
+            co_status = ''
+            if s['clock_out_done']:
+                co_status = '<span class="val done">' + s["clock_out_effective"] + '</span><span class="tag done">Done</span>'
+            else:
+                co_status = '<span class="val pending">' + s["clock_out_effective"] + '</span><span class="tag pending">Pending</span>'
+
+            th = s['total_hours']
+            th_class = 'ok' if th >= 9.0 else 'low'
+            th_display = f"{th:.1f}h"
+
+            nine_h_row = ''
+            if s['min_clockout_9h']:
+                nine_h_row = '<div class="row"><span class="lbl">9h05m Minimum</span><span class="val">' + s["min_clockout_9h"] + '</span></div>'
+
+            ext_info = ''
+            if s['extend_minutes'] > 0:
+                ext_info = '<span class="ext-info">+' + str(s["extend_minutes"]) + 'm extended</span>'
+
+            # Holiday table rows
+            from datetime import date as _date
+            today_d = _date.today()
+            hol_rows = ''
+            sorted_hols = sorted(HOLIDAYS.items())
+            for (y, m, d), name in sorted_hols:
+                dt = _date(y, m, d)
+                cls = ' class="past"' if dt < today_d else ''
+                hol_rows += '<tr' + cls + '><td>' + dt.strftime("%b %d") + '</td><td>' + dt.strftime("%a") + '</td><td>' + name + '</td></tr>'
+
+            # Custom exempt rows
+            exempt_rows = ''
+            for ed in exempt:
+                exempt_rows += '<tr><td>' + ed + '</td><td><button class="rm-btn" onclick="removeExempt(\'' + ed + '\')">Remove</button></td></tr>'
+
+            # Build schedule section (workday) or off-badge (holiday/weekend)
+            if s['holiday_name'] or s['is_weekend']:
+                schedule_html = '<div class="card off-badge"><div class="icon">&#127796;</div><p>No clock-in/out today</p></div>'
+            else:
+                ext_disabled = ' disabled' if s['clock_out_done'] else ''
+                ext_msg_text = 'Clock-out already done' if s['clock_out_done'] else ''
+                schedule_html = (
+                    '<div class="card">'
+                    '<h3>Schedule</h3>'
+                    '<div class="row"><span class="lbl">Clock In</span><span>' + ci_status + '</span></div>'
+                    '<div class="row"><span class="lbl">Clock Out</span><span>' + co_status + '</span></div>'
+                    '<div class="row"><span class="lbl">Random Slot</span><span class="val">' + s['clock_out_random'] + '</span></div>'
+                    + nine_h_row +
+                    '</div>'
+                    '<div class="card total-card">'
+                    '<div class="total-num ' + th_class + '">' + th_display + '</div>'
+                    '<div class="total-lbl">Estimated Total Hours</div>'
+                    + ext_info +
+                    '</div>'
+                    '<div class="card">'
+                    '<h3>Adjust Clock-Out</h3>'
+                    '<p style="font-size:13px;color:#666;margin-bottom:12px">Push clock-out later if you need more hours.</p>'
+                    '<div class="actions">'
+                    '<button class="btn blue" id="extBtn" onclick="extendOut()"' + ext_disabled + '>+ 1 Hour</button>'
+                    '</div>'
+                    '<div class="msg" id="extMsg">' + ext_msg_text + '</div>'
+                    '</div>'
+                )
+
+            html = f"""<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Keka Dashboard</title>
+<style>
+*{{box-sizing:border-box;margin:0;padding:0}}
+body{{font-family:-apple-system,BlinkMacSystemFont,Segoe UI,Roboto,sans-serif;background:#f0f2f5;color:#1a1a1a;padding:16px;max-width:480px;margin:0 auto}}
+.hdr{{text-align:center;padding:20px 0 8px}}
+.hdr h1{{font-size:22px;font-weight:700;letter-spacing:-0.5px}}
+.hdr .dt{{color:#666;font-size:14px;margin:4px 0 10px}}
+.badge{{display:inline-block;padding:4px 14px;border-radius:20px;font-size:12px;font-weight:600}}
+.badge.holiday{{background:#fff3e0;color:#e65100}}
+.badge.weekend{{background:#e3f2fd;color:#1565c0}}
+.badge.workday{{background:#e8f5e9;color:#2e7d32}}
+.card{{background:#fff;border-radius:14px;padding:18px 20px;margin:14px 0;box-shadow:0 1px 4px rgba(0,0,0,.06)}}
+.card h3{{font-size:11px;text-transform:uppercase;letter-spacing:1px;color:#999;margin-bottom:14px}}
+.row{{display:flex;justify-content:space-between;align-items:center;padding:7px 0}}
+.row .lbl{{font-size:14px;color:#555}}
+.row .val{{font-size:16px;font-weight:600}}
+.row .val.done{{color:#2e7d32}} .row .val.pending{{color:#e65100}}
+.tag{{font-size:11px;padding:2px 8px;border-radius:10px;margin-left:8px;font-weight:600}}
+.tag.done{{background:#e8f5e9;color:#2e7d32}}
+.tag.pending{{background:#fff3e0;color:#e65100}}
+.total-card{{text-align:center;padding:24px 20px}}
+.total-num{{font-size:56px;font-weight:800;line-height:1}}
+.total-num.ok{{color:#2e7d32}} .total-num.low{{color:#c62828}}
+.total-lbl{{font-size:14px;color:#777;margin-top:6px}}
+.ext-info{{display:block;font-size:12px;color:#1976d2;margin-top:4px}}
+.actions{{display:flex;gap:10px;margin-top:14px;flex-wrap:wrap}}
+.btn{{flex:1;padding:12px;font-size:14px;font-weight:600;border:none;border-radius:10px;cursor:pointer;min-width:120px}}
+.btn.blue{{background:#1976d2;color:#fff}} .btn.blue:hover{{background:#1565c0}}
+.btn:disabled{{opacity:.5;cursor:not-allowed}}
+.msg{{text-align:center;margin-top:8px;font-size:13px;font-weight:600;min-height:20px}}
+.hol-tbl{{width:100%;border-collapse:collapse}}
+.hol-tbl td{{padding:6px 4px;font-size:13px;border-bottom:1px solid #f5f5f5}}
+.hol-tbl td:first-child{{font-weight:600;width:70px}}
+.hol-tbl tr.past{{opacity:.35}}
+.hol-tbl tr:last-child td{{border-bottom:none}}
+.exempt-section{{margin-top:14px;padding-top:14px;border-top:1px solid #eee}}
+.exempt-section h4{{font-size:12px;color:#999;margin-bottom:10px;text-transform:uppercase;letter-spacing:.5px}}
+.add-row{{display:flex;gap:8px;margin-bottom:10px}}
+.add-row input{{flex:1;padding:10px;border:1px solid #ddd;border-radius:8px;font-size:14px}}
+.add-row button{{padding:10px 16px;border:none;border-radius:8px;background:#1976d2;color:#fff;font-weight:600;cursor:pointer;font-size:13px}}
+.rm-btn{{padding:2px 10px;border:1px solid #fcc;background:#fff0f0;color:#c62828;border-radius:6px;cursor:pointer;font-size:12px}}
+.exempt-tbl{{width:100%;border-collapse:collapse}}
+.exempt-tbl td{{padding:5px 4px;font-size:13px;border-bottom:1px solid #f5f5f5}}
+.off-badge{{text-align:center;padding:32px 20px}}
+.off-badge .icon{{font-size:48px}}
+.off-badge p{{color:#666;margin-top:10px;font-size:15px}}
+</style>
+</head>
+<body>
+<div class="hdr">
+  <h1>Keka Attendance</h1>
+  <div class="dt">{s['date']}</div>
+  {badge}
+</div>
+
+{schedule_html}
+
+<div class="card">
+  <h3>Company Holidays</h3>
+  <table class="hol-tbl">{hol_rows}</table>
+  <div class="exempt-section">
+    <h4>Custom Exempt Days</h4>
+    <div class="add-row">
+      <input type="date" id="exemptDate">
+      <button onclick="addExempt()">Add</button>
+    </div>
+    <div id="exemptMsg" class="msg"></div>
+    <table class="exempt-tbl" id="exemptTbl">{exempt_rows}</table>
+  </div>
+</div>
+
+<script>
+var BASE={repr(base)};
+var SEP={repr(sep)};
+function extendOut(){{
+  var b=document.getElementById('extBtn');
+  var m=document.getElementById('extMsg');
+  b.disabled=true; m.textContent='Extending...';
+  fetch(BASE+SEP+'action=extend-out')
+    .then(function(r){{return r.text();}})
+    .then(function(t){{
+      if(t.indexOf('Error')!==-1||t.indexOf('already')!==-1){{m.style.color='#c62828';m.textContent=t;b.disabled=false;}}
+      else{{m.style.color='#2e7d32';m.textContent='Extended! Refreshing...';setTimeout(function(){{location.reload();}},1000);}}
+    }})
+    .catch(function(e){{m.textContent='Error: '+e;b.disabled=false;}});
+}}
+function addExempt(){{
+  var d=document.getElementById('exemptDate').value;
+  var m=document.getElementById('exemptMsg');
+  if(!d){{m.style.color='#c62828';m.textContent='Pick a date first';return;}}
+  m.textContent='Adding...';
+  fetch(BASE+SEP+'action=add-exempt&date='+encodeURIComponent(d))
+    .then(function(r){{return r.text();}})
+    .then(function(t){{
+      if(t.indexOf('Error')!==-1){{m.style.color='#c62828';m.textContent=t;}}
+      else{{m.style.color='#2e7d32';m.textContent='Added!';setTimeout(function(){{location.reload();}},800);}}
+    }})
+    .catch(function(e){{m.textContent='Error: '+e;}});
+}}
+function removeExempt(d){{
+  if(!confirm('Remove '+d+'?'))return;
+  fetch(BASE+SEP+'action=remove-exempt&date='+encodeURIComponent(d))
+    .then(function(){{location.reload();}})
+    .catch(function(e){{alert('Error: '+e);}});
+}}
+</script>
+<footer style="text-align:center;margin-top:28px;color:#bbb;font-size:12px">Made with &hearts; by Viral</footer>
+</body></html>"""
+            self.send_response(200)
+            self.send_header('Content-type', 'text/html; charset=utf-8')
+            self.end_headers()
+            self.wfile.write(html.encode('utf-8'))
+            return
+        elif action == 'extend-out':
+            result = extend_clock_out(60)
+            self.send_response(200)
+            self.send_header('Content-type', 'text/plain')
+            self.end_headers()
+            if isinstance(result, int):
+                self.wfile.write(f"Clock-out extended. Total: +{result}m".encode('utf-8'))
+            else:
+                self.wfile.write(str(result).encode('utf-8'))
+            return
+        elif action == 'add-exempt':
+            date_str = query.get('date', [''])[0]
+            result = add_exempt_date(date_str)
+            self.send_response(200)
+            self.send_header('Content-type', 'text/plain')
+            self.end_headers()
+            self.wfile.write(("Exempt date added" if result is True else str(result)).encode('utf-8'))
+            return
+        elif action == 'remove-exempt':
+            date_str = query.get('date', [''])[0]
+            result = remove_exempt_date(date_str)
+            self.send_response(200)
+            self.send_header('Content-type', 'text/plain')
+            self.end_headers()
+            self.wfile.write(("Exempt date removed" if result is True else str(result)).encode('utf-8'))
+            return
+
         self.send_response(200)
         self.send_header('Content-type', 'text/plain')
         self.end_headers()
 
         if not action:
             self.wfile.write(
-                b"Available actions: in, out, refresh, force-refresh, status, auth-auto, auth-auto-static, auth-start, auth-url, oauth-callback\n"
+                b"Available actions: in, out, refresh, force-refresh, status, dashboard, auth-auto, auth-auto-static, auth-start, auth-url, oauth-callback\n"
             )
             return
 
