@@ -28,6 +28,16 @@ LOG_LEVEL = os.environ.get('LOG_LEVEL', 'INFO').upper()
 TOKEN_EXPIRY_BUFFER = int(os.environ.get('TOKEN_EXPIRY_BUFFER', '300'))
 TOKEN_REFRESH_INTERVAL = int(os.environ.get('TOKEN_REFRESH_INTERVAL', '10800'))  # 3 hours in seconds
 
+HOLIDAYS = {
+    (2027, 9, 4): "Janmashtami",
+    (2027, 9, 14): "Ganesh Chaturthi / Samvatsari",
+    (2027, 10, 2): "Mahatma Gandhi Jayanti",
+    (2027, 10, 20): "Dussehra",
+    (2027, 11, 8): "Diwali / Deepavali",
+    (2027, 11, 10): "Vikram Samvat New Year",
+    (2027, 11, 11): "Bhai Dooj",
+}
+
 # Configure logging (after LOG_LEVEL is defined)
 log_level_map = {
     'DEBUG': logging.DEBUG,
@@ -499,6 +509,20 @@ def is_weekday():
     """Check if today is a weekday in IST"""
     return datetime.now(IST).weekday() < 5  # Monday = 0, Friday = 4
 
+def is_holiday(dt=None):
+    """Check if a date is a company holiday or a custom-exempted date."""
+    if dt is None:
+        dt = datetime.now(IST)
+    key = (dt.year, dt.month, dt.day)
+    if key in HOLIDAYS:
+        return True
+    if kv:
+        try:
+            return kv.sismember('keka_exempt_dates', f"{key[0]}-{key[1]:02d}-{key[2]:02d}")
+        except Exception:
+            pass
+    return False
+
 def _should_run_action(action_key, window_key, start_h, start_m, end_h, end_m, slot=None, step_min=5):
     """Decide if a clock action should fire now, handling Vercel Hobby plan delays.
 
@@ -563,6 +587,9 @@ def run_clock_in(forced=False, slot=None):
     if not forced and not is_weekday():
         logging.info("Not a weekday. Skipping clock-in.")
         return False
+    if not forced and is_holiday():
+        logging.info(f"Today is a holiday. Skipping clock-in.")
+        return True
     if not forced and not _should_run_action('clock_in', 0, 9, 0, 9, 30, slot=slot):
         return True  # Not a failure — just not the right slot or already done
     logging.info("Attempting clock in...")
@@ -592,6 +619,9 @@ def run_clock_out(forced=False, slot=None):
     if not forced and not is_weekday():
         logging.info("Not a weekday. Skipping clock-out.")
         return False
+    if not forced and is_holiday():
+        logging.info(f"Today is a holiday. Skipping clock-out.")
+        return True
 
     now_ist = datetime.now(IST)
     current = now_ist.hour * 60 + now_ist.minute
@@ -635,6 +665,18 @@ def run_clock_out(forced=False, slot=None):
             except Exception as e:
                 logging.warning(f"Failed to read clock-in time: {e}")
 
+        # Manual extension from dashboard
+        extend_minutes = 0
+        if kv:
+            try:
+                raw = kv.get(f'keka_clockout_extend_{today}')
+                if raw:
+                    if isinstance(raw, bytes):
+                        raw = raw.decode('utf-8')
+                    extend_minutes = int(raw)
+            except Exception:
+                pass
+
         effective_earliest = random_time
         if min_clockout is not None and min_clockout > effective_earliest:
             effective_earliest = min_clockout
@@ -643,6 +685,9 @@ def run_clock_out(forced=False, slot=None):
                 f"{random_time // 60:02d}:{random_time % 60:02d} to "
                 f"{effective_earliest // 60:02d}:{effective_earliest % 60:02d}"
             )
+        if extend_minutes > 0:
+            effective_earliest += extend_minutes
+            logging.info(f"clock_out: +{extend_minutes}m extension, effective now {effective_earliest // 60:02d}:{effective_earliest % 60:02d}")
 
         min_str = f"{min_clockout // 60:02d}:{min_clockout % 60:02d}" if min_clockout is not None else "N/A"
         logging.info(
@@ -698,6 +743,185 @@ def run_token_refresh():
     else:
         logging.error("No tokens found. Cannot refresh.")
         return False
+
+def get_today_schedule():
+    """Compute today's planned clock-in/out times and status for dashboard display."""
+    now_ist = datetime.now(IST)
+    today = int(now_ist.strftime('%Y%m%d'))
+    today_tuple = (now_ist.year, now_ist.month, now_ist.day)
+
+    holiday_name = HOLIDAYS.get(today_tuple)
+    is_custom_exempt = False
+    if not holiday_name and kv:
+        try:
+            date_str = f"{today_tuple[0]}-{today_tuple[1]:02d}-{today_tuple[2]:02d}"
+            if kv.sismember('keka_exempt_dates', date_str):
+                is_custom_exempt = True
+                holiday_name = "Custom Exempt Day"
+        except Exception:
+            pass
+    is_wkend = now_ist.weekday() >= 5
+
+    # Clock-in slot (same RNG as _should_run_action)
+    rng_in = _random_mod.Random(today * 10 + 0)
+    in_slots = list(range(9 * 60, 9 * 60 + 31, 5))
+    clock_in_slot = rng_in.choice(in_slots)
+
+    # Clock-out random slot (same RNG as run_clock_out)
+    rng_out = _random_mod.Random(today * 10 + 1)
+    out_slots = list(range(18 * 60 + 30, 19 * 60 + 1, 5))
+    clock_out_random = rng_out.choice(out_slots)
+
+    actual_clock_in = None
+    actual_clock_in_minutes = None
+    min_clockout = None
+    if kv:
+        try:
+            raw = kv.get('keka_clock_in_actual')
+            if raw:
+                if isinstance(raw, bytes):
+                    raw = raw.decode('utf-8')
+                ci_epoch = int(raw)
+                ci_dt = datetime.fromtimestamp(ci_epoch, tz=IST)
+                if ci_dt.date() == now_ist.date():
+                    actual_clock_in = ci_dt.strftime('%H:%M')
+                    actual_clock_in_minutes = ci_dt.hour * 60 + ci_dt.minute
+                    min_out_dt = ci_dt + timedelta(hours=9, minutes=5)
+                    min_clockout = min_out_dt.hour * 60 + min_out_dt.minute
+        except Exception:
+            pass
+
+    extend_minutes = 0
+    if kv:
+        try:
+            raw = kv.get(f'keka_clockout_extend_{today}')
+            if raw:
+                if isinstance(raw, bytes):
+                    raw = raw.decode('utf-8')
+                extend_minutes = int(raw)
+        except Exception:
+            pass
+
+    effective_out = clock_out_random
+    if min_clockout is not None and min_clockout > effective_out:
+        effective_out = min_clockout
+    effective_out += extend_minutes
+
+    in_min = actual_clock_in_minutes if actual_clock_in_minutes else clock_in_slot
+    total_minutes = effective_out - in_min
+
+    clock_in_done = False
+    clock_out_done = False
+    if kv:
+        try:
+            ci = kv.get('keka_clock_in_done')
+            if ci:
+                if isinstance(ci, bytes):
+                    ci = ci.decode('utf-8')
+                clock_in_done = ci == str(today)
+        except Exception:
+            pass
+        try:
+            co = kv.get('keka_clock_out_done')
+            if co:
+                if isinstance(co, bytes):
+                    co = co.decode('utf-8')
+                clock_out_done = co == str(today)
+        except Exception:
+            pass
+
+    def fmt(m):
+        h, mn = divmod(m, 60)
+        return f"{h:02d}:{mn:02d}"
+
+    return {
+        'date': now_ist.strftime('%A, %B %d, %Y'),
+        'holiday_name': holiday_name,
+        'is_weekend': is_wkend,
+        'clock_in_planned': fmt(clock_in_slot),
+        'clock_in_actual': actual_clock_in,
+        'clock_in_done': clock_in_done,
+        'clock_out_random': fmt(clock_out_random),
+        'clock_out_effective': fmt(effective_out),
+        'min_clockout_9h': fmt(min_clockout) if min_clockout else None,
+        'total_hours': total_minutes / 60,
+        'total_minutes': total_minutes,
+        'clock_out_done': clock_out_done,
+        'extend_minutes': extend_minutes,
+    }
+
+
+def extend_clock_out(minutes=60):
+    """Add minutes to today's clock-out extension. Returns new total or error string."""
+    if not kv:
+        return "Redis not available"
+    now_ist = datetime.now(IST)
+    today = int(now_ist.strftime('%Y%m%d'))
+    try:
+        co = kv.get('keka_clock_out_done')
+        if co:
+            if isinstance(co, bytes):
+                co = co.decode('utf-8')
+            if co == str(today):
+                return "Clock-out already done today"
+    except Exception:
+        pass
+    key = f'keka_clockout_extend_{today}'
+    try:
+        current = kv.get(key)
+        if current:
+            if isinstance(current, bytes):
+                current = current.decode('utf-8')
+            new_total = int(current) + minutes
+        else:
+            new_total = minutes
+        kv.set(key, str(new_total), ex=86400)
+        return new_total
+    except Exception as e:
+        return f"Error: {e}"
+
+
+def add_exempt_date(date_str):
+    """Add a custom exempt date (YYYY-MM-DD). Returns True or error string."""
+    if not kv:
+        return "Redis not available"
+    try:
+        datetime.strptime(date_str, '%Y-%m-%d')
+    except ValueError:
+        return "Invalid date format, use YYYY-MM-DD"
+    try:
+        kv.sadd('keka_exempt_dates', date_str)
+        return True
+    except Exception as e:
+        return f"Error: {e}"
+
+
+def remove_exempt_date(date_str):
+    """Remove a custom exempt date. Returns True or error string."""
+    if not kv:
+        return "Redis not available"
+    try:
+        kv.srem('keka_exempt_dates', date_str)
+        return True
+    except Exception as e:
+        return f"Error: {e}"
+
+
+def get_exempt_dates():
+    """Return list of custom exempt dates from Redis."""
+    if not kv:
+        return []
+    try:
+        raw = kv.smembers('keka_exempt_dates')
+        dates = []
+        for d in raw:
+            if isinstance(d, bytes):
+                d = d.decode('utf-8')
+            dates.append(d)
+        return sorted(dates)
+    except Exception:
+        return []
+
 
 # --- CLI Setup Logic ---
 
