@@ -9,7 +9,9 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from keka import (KekaAttendance, run_clock_in, run_clock_out, run_token_refresh,
                    get_today_schedule, extend_clock_out, add_exempt_date,
-                   remove_exempt_date, get_exempt_dates, HOLIDAYS)
+                   remove_exempt_date, get_exempt_dates, get_all_holidays,
+                   add_holiday, remove_holiday, add_force_workday,
+                   remove_force_workday, get_force_workdays)
 
 
 def _html_result(ok, message):
@@ -428,13 +430,17 @@ h2{color:#cf222e}p{color:#555}</style></head>
         elif action == 'dashboard':
             s = get_today_schedule()
             exempt = get_exempt_dates()
+            all_hols = get_all_holidays()
+            force_days = get_force_workdays()
             base = f"{self._base_url()}/api/cron"
             _ps = query.get('secret', [''])[0]
             if _ps:
                 base += f"?secret={_ps}"
             sep = '&' if '?' in base else '?'
 
-            if s['holiday_name']:
+            if s.get('is_force_workday'):
+                badge = '<span class="badge force">Force Workday</span>'
+            elif s['holiday_name']:
                 badge = '<span class="badge holiday">' + s["holiday_name"] + '</span>'
             elif s['is_weekend']:
                 badge = '<span class="badge weekend">Weekend</span>'
@@ -466,25 +472,35 @@ h2{color:#cf222e}p{color:#555}</style></head>
             if s['extend_minutes'] > 0:
                 ext_info = '<span class="ext-info">+' + str(s["extend_minutes"]) + 'm extended</span>'
 
-            # Holiday table rows
+            # Holiday table rows (from merged list)
             from datetime import date as _date
             today_d = _date.today()
             hol_rows = ''
-            sorted_hols = sorted(HOLIDAYS.items())
-            for (y, m, d), name in sorted_hols:
-                dt = _date(y, m, d)
+            for date_str_h, info in all_hols.items():
+                try:
+                    dt = _date.fromisoformat(date_str_h)
+                except Exception:
+                    continue
                 cls = ' class="past"' if dt < today_d else ''
-                hol_rows += '<tr' + cls + '><td>' + dt.strftime("%b %d") + '</td><td>' + dt.strftime("%a") + '</td><td>' + name + '</td></tr>'
+                src_tag = ''
+                if info['source'] == 'custom':
+                    src_tag = ' <span class="src-tag">custom</span>'
+                rm_btn = '<button class="rm-btn" onclick="removeHoliday(\'' + date_str_h + '\')">Remove</button>'
+                hol_rows += '<tr' + cls + '><td>' + dt.strftime("%b %d") + '</td><td>' + dt.strftime("%a") + '</td><td>' + info['name'] + src_tag + '</td><td>' + rm_btn + '</td></tr>'
 
             # Custom exempt rows
             exempt_rows = ''
             for ed in exempt:
                 exempt_rows += '<tr><td>' + ed + '</td><td><button class="rm-btn" onclick="removeExempt(\'' + ed + '\')">Remove</button></td></tr>'
 
-            # Build schedule section (workday) or off-badge (holiday/weekend)
-            if s['holiday_name'] or s['is_weekend']:
-                schedule_html = '<div class="card off-badge"><div class="icon">&#127796;</div><p>No clock-in/out today</p></div>'
-            else:
+            # Force workday rows
+            force_rows = ''
+            for fd in force_days:
+                force_rows += '<tr><td>' + fd + '</td><td><button class="rm-btn" onclick="removeForceDay(\'' + fd + '\')">Remove</button></td></tr>'
+
+            # Build schedule section
+            show_schedule = not (s['holiday_name'] or s['is_weekend']) or s.get('is_force_workday')
+            if show_schedule:
                 ext_disabled = ' disabled' if s['clock_out_done'] else ''
                 ext_msg_text = 'Clock-out already done' if s['clock_out_done'] else ''
                 schedule_html = (
@@ -509,6 +525,8 @@ h2{color:#cf222e}p{color:#555}</style></head>
                     '<div class="msg" id="extMsg">' + ext_msg_text + '</div>'
                     '</div>'
                 )
+            else:
+                schedule_html = '<div class="card off-badge"><div class="icon">&#127796;</div><p>No clock-in/out today</p></div>'
 
             html = f"""<!DOCTYPE html>
 <html>
@@ -525,6 +543,7 @@ body{{font-family:-apple-system,BlinkMacSystemFont,Segoe UI,Roboto,sans-serif;ba
 .badge.holiday{{background:#fff3e0;color:#e65100}}
 .badge.weekend{{background:#e3f2fd;color:#1565c0}}
 .badge.workday{{background:#e8f5e9;color:#2e7d32}}
+.badge.force{{background:#ede7f6;color:#6a1b9a}}
 .card{{background:#fff;border-radius:14px;padding:18px 20px;margin:14px 0;box-shadow:0 1px 4px rgba(0,0,0,.06)}}
 .card h3{{font-size:11px;text-transform:uppercase;letter-spacing:1px;color:#999;margin-bottom:14px}}
 .row{{display:flex;justify-content:space-between;align-items:center;padding:7px 0}}
@@ -549,17 +568,17 @@ body{{font-family:-apple-system,BlinkMacSystemFont,Segoe UI,Roboto,sans-serif;ba
 .hol-tbl td:first-child{{font-weight:600;width:70px}}
 .hol-tbl tr.past{{opacity:.35}}
 .hol-tbl tr:last-child td{{border-bottom:none}}
-.exempt-section{{margin-top:14px;padding-top:14px;border-top:1px solid #eee}}
-.exempt-section h4{{font-size:12px;color:#999;margin-bottom:10px;text-transform:uppercase;letter-spacing:.5px}}
+.src-tag{{font-size:10px;color:#1976d2;background:#e3f2fd;padding:1px 6px;border-radius:8px;margin-left:4px}}
 .add-row{{display:flex;gap:8px;margin-bottom:10px}}
 .add-row input{{flex:1;padding:10px;border:1px solid #ddd;border-radius:8px;font-size:14px}}
-.add-row button{{padding:10px 16px;border:none;border-radius:8px;background:#1976d2;color:#fff;font-weight:600;cursor:pointer;font-size:13px}}
+.add-row button{{padding:10px 16px;border:none;border-radius:8px;background:#1976d2;color:#fff;font-weight:600;cursor:pointer;font-size:13px;white-space:nowrap}}
 .rm-btn{{padding:2px 10px;border:1px solid #fcc;background:#fff0f0;color:#c62828;border-radius:6px;cursor:pointer;font-size:12px}}
-.exempt-tbl{{width:100%;border-collapse:collapse}}
-.exempt-tbl td{{padding:5px 4px;font-size:13px;border-bottom:1px solid #f5f5f5}}
+.list-tbl{{width:100%;border-collapse:collapse}}
+.list-tbl td{{padding:5px 4px;font-size:13px;border-bottom:1px solid #f5f5f5}}
 .off-badge{{text-align:center;padding:32px 20px}}
 .off-badge .icon{{font-size:48px}}
 .off-badge p{{color:#666;margin-top:10px;font-size:15px}}
+.section-desc{{font-size:13px;color:#666;margin-bottom:12px}}
 </style>
 </head>
 <body>
@@ -572,17 +591,36 @@ body{{font-family:-apple-system,BlinkMacSystemFont,Segoe UI,Roboto,sans-serif;ba
 {schedule_html}
 
 <div class="card">
-  <h3>Company Holidays</h3>
-  <table class="hol-tbl">{hol_rows}</table>
-  <div class="exempt-section">
-    <h4>Custom Exempt Days</h4>
-    <div class="add-row">
-      <input type="date" id="exemptDate">
-      <button onclick="addExempt()">Add</button>
-    </div>
-    <div id="exemptMsg" class="msg"></div>
-    <table class="exempt-tbl" id="exemptTbl">{exempt_rows}</table>
+  <h3>Holidays</h3>
+  <div class="add-row">
+    <input type="date" id="holDate">
+    <input type="text" id="holName" placeholder="Holiday name" style="min-width:0">
+    <button onclick="addHoliday()">Add</button>
   </div>
+  <div id="holMsg" class="msg"></div>
+  <table class="hol-tbl">{hol_rows}</table>
+</div>
+
+<div class="card">
+  <h3>Custom Exempt Days</h3>
+  <p class="section-desc">Skip clock-in/out on these dates.</p>
+  <div class="add-row">
+    <input type="date" id="exemptDate">
+    <button onclick="addExempt()">Add</button>
+  </div>
+  <div id="exemptMsg" class="msg"></div>
+  <table class="list-tbl" id="exemptTbl">{exempt_rows}</table>
+</div>
+
+<div class="card">
+  <h3>Force Work Days</h3>
+  <p class="section-desc">Clock in/out on these dates even if holiday or weekend.</p>
+  <div class="add-row">
+    <input type="date" id="forceDate">
+    <button onclick="addForceDay()">Add</button>
+  </div>
+  <div id="forceMsg" class="msg"></div>
+  <table class="list-tbl" id="forceTbl">{force_rows}</table>
 </div>
 
 <script>
@@ -619,6 +657,45 @@ function removeExempt(d){{
     .then(function(){{location.reload();}})
     .catch(function(e){{alert('Error: '+e);}});
 }}
+function addHoliday(){{
+  var d=document.getElementById('holDate').value;
+  var n=document.getElementById('holName').value;
+  var m=document.getElementById('holMsg');
+  if(!d||!n){{m.style.color='#c62828';m.textContent='Pick a date and enter a name';return;}}
+  m.textContent='Adding...';
+  fetch(BASE+SEP+'action=add-holiday&date='+encodeURIComponent(d)+'&name='+encodeURIComponent(n))
+    .then(function(r){{return r.text();}})
+    .then(function(t){{
+      if(t.indexOf('Error')!==-1){{m.style.color='#c62828';m.textContent=t;}}
+      else{{m.style.color='#2e7d32';m.textContent='Added!';setTimeout(function(){{location.reload();}},800);}}
+    }})
+    .catch(function(e){{m.textContent='Error: '+e;}});
+}}
+function removeHoliday(d){{
+  if(!confirm('Remove holiday '+d+'?'))return;
+  fetch(BASE+SEP+'action=remove-holiday&date='+encodeURIComponent(d))
+    .then(function(){{location.reload();}})
+    .catch(function(e){{alert('Error: '+e);}});
+}}
+function addForceDay(){{
+  var d=document.getElementById('forceDate').value;
+  var m=document.getElementById('forceMsg');
+  if(!d){{m.style.color='#c62828';m.textContent='Pick a date first';return;}}
+  m.textContent='Adding...';
+  fetch(BASE+SEP+'action=add-force-workday&date='+encodeURIComponent(d))
+    .then(function(r){{return r.text();}})
+    .then(function(t){{
+      if(t.indexOf('Error')!==-1){{m.style.color='#c62828';m.textContent=t;}}
+      else{{m.style.color='#2e7d32';m.textContent='Added!';setTimeout(function(){{location.reload();}},800);}}
+    }})
+    .catch(function(e){{m.textContent='Error: '+e;}});
+}}
+function removeForceDay(d){{
+  if(!confirm('Remove force workday '+d+'?'))return;
+  fetch(BASE+SEP+'action=remove-force-workday&date='+encodeURIComponent(d))
+    .then(function(){{location.reload();}})
+    .catch(function(e){{alert('Error: '+e);}});
+}}
 </script>
 <footer style="text-align:center;margin-top:28px;color:#bbb;font-size:12px">Made with &hearts; by Viral</footer>
 </body></html>"""
@@ -652,6 +729,39 @@ function removeExempt(d){{
             self.send_header('Content-type', 'text/plain')
             self.end_headers()
             self.wfile.write(("Exempt date removed" if result is True else str(result)).encode('utf-8'))
+            return
+        elif action == 'add-holiday':
+            date_str = query.get('date', [''])[0]
+            name = query.get('name', [''])[0]
+            result = add_holiday(date_str, name)
+            self.send_response(200)
+            self.send_header('Content-type', 'text/plain')
+            self.end_headers()
+            self.wfile.write(("Holiday added" if result is True else str(result)).encode('utf-8'))
+            return
+        elif action == 'remove-holiday':
+            date_str = query.get('date', [''])[0]
+            result = remove_holiday(date_str)
+            self.send_response(200)
+            self.send_header('Content-type', 'text/plain')
+            self.end_headers()
+            self.wfile.write(("Holiday removed" if result is True else str(result)).encode('utf-8'))
+            return
+        elif action == 'add-force-workday':
+            date_str = query.get('date', [''])[0]
+            result = add_force_workday(date_str)
+            self.send_response(200)
+            self.send_header('Content-type', 'text/plain')
+            self.end_headers()
+            self.wfile.write(("Force workday added" if result is True else str(result)).encode('utf-8'))
+            return
+        elif action == 'remove-force-workday':
+            date_str = query.get('date', [''])[0]
+            result = remove_force_workday(date_str)
+            self.send_response(200)
+            self.send_header('Content-type', 'text/plain')
+            self.end_headers()
+            self.wfile.write(("Force workday removed" if result is True else str(result)).encode('utf-8'))
             return
 
         self.send_response(200)
