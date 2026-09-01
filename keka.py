@@ -29,8 +29,9 @@ TOKEN_EXPIRY_BUFFER = int(os.environ.get('TOKEN_EXPIRY_BUFFER', '300'))
 TOKEN_REFRESH_INTERVAL = int(os.environ.get('TOKEN_REFRESH_INTERVAL', '10800'))  # 3 hours in seconds
 
 HOLIDAYS = {
-    (2027, 9, 4): "Janmashtami",
-    (2027, 9, 14): "Ganesh Chaturthi / Samvatsari",
+    (2027, 8, 25): "Janmashtami",
+    (2027, 9, 14): "Ganesh Chaturthi",
+    (2027, 9, 15): "Samvatsari",
     (2027, 10, 2): "Mahatma Gandhi Jayanti",
     (2027, 10, 20): "Dussehra",
     (2027, 11, 8): "Diwali / Deepavali",
@@ -510,18 +511,50 @@ def is_weekday():
     return datetime.now(IST).weekday() < 5  # Monday = 0, Friday = 4
 
 def is_holiday(dt=None):
-    """Check if a date is a company holiday or a custom-exempted date."""
+    """Check if a date is a company holiday, custom-added holiday, or a custom-exempted date."""
     if dt is None:
         dt = datetime.now(IST)
     key = (dt.year, dt.month, dt.day)
+    date_str = f"{key[0]}-{key[1]:02d}-{key[2]:02d}"
+
     if key in HOLIDAYS:
-        return True
+        if kv:
+            try:
+                if kv.sismember('keka_holidays_removed', date_str):
+                    pass
+                else:
+                    return True
+            except Exception:
+                return True
+        else:
+            return True
+
     if kv:
         try:
-            return kv.sismember('keka_exempt_dates', f"{key[0]}-{key[1]:02d}-{key[2]:02d}")
+            if kv.hexists('keka_holidays_added', date_str):
+                return True
         except Exception:
             pass
+        try:
+            if kv.sismember('keka_exempt_dates', date_str):
+                return True
+        except Exception:
+            pass
+
     return False
+
+
+def is_force_workday(dt=None):
+    """Check if a date is marked as a force work day (clock in/out even on holidays/weekends)."""
+    if dt is None:
+        dt = datetime.now(IST)
+    if not kv:
+        return False
+    date_str = f"{dt.year}-{dt.month:02d}-{dt.day:02d}"
+    try:
+        return bool(kv.sismember('keka_force_workdays', date_str))
+    except Exception:
+        return False
 
 def _should_run_action(action_key, window_key, start_h, start_m, end_h, end_m, slot=None, step_min=5):
     """Decide if a clock action should fire now, handling Vercel Hobby plan delays.
@@ -584,12 +617,15 @@ def _should_run_action(action_key, window_key, start_h, start_m, end_h, end_m, s
 
 def run_clock_in(forced=False, slot=None):
     """Executed by Cron or manual button. forced=True bypasses weekday and time-window checks."""
-    if not forced and not is_weekday():
-        logging.info("Not a weekday. Skipping clock-in.")
-        return False
-    if not forced and is_holiday():
-        logging.info(f"Today is a holiday. Skipping clock-in.")
-        return True
+    if not forced:
+        if is_force_workday():
+            logging.info("Force workday — proceeding with clock-in.")
+        elif not is_weekday():
+            logging.info("Not a weekday. Skipping clock-in.")
+            return False
+        elif is_holiday():
+            logging.info("Today is a holiday. Skipping clock-in.")
+            return True
     if not forced and not _should_run_action('clock_in', 0, 9, 0, 9, 30, slot=slot):
         return True  # Not a failure — just not the right slot or already done
     logging.info("Attempting clock in...")
@@ -616,12 +652,15 @@ def run_clock_out(forced=False, slot=None):
     whether both the random preferred time AND the 9h minimum have been reached;
     the first cron past both thresholds claims via Redis NX.
     """
-    if not forced and not is_weekday():
-        logging.info("Not a weekday. Skipping clock-out.")
-        return False
-    if not forced and is_holiday():
-        logging.info(f"Today is a holiday. Skipping clock-out.")
-        return True
+    if not forced:
+        if is_force_workday():
+            logging.info("Force workday — proceeding with clock-out.")
+        elif not is_weekday():
+            logging.info("Not a weekday. Skipping clock-out.")
+            return False
+        elif is_holiday():
+            logging.info("Today is a holiday. Skipping clock-out.")
+            return True
 
     now_ist = datetime.now(IST)
     current = now_ist.hour * 60 + now_ist.minute
@@ -750,17 +789,40 @@ def get_today_schedule():
     today = int(now_ist.strftime('%Y%m%d'))
     today_tuple = (now_ist.year, now_ist.month, now_ist.day)
 
-    holiday_name = HOLIDAYS.get(today_tuple)
+    date_str = f"{today_tuple[0]}-{today_tuple[1]:02d}-{today_tuple[2]:02d}"
+
+    holiday_name = None
+    if today_tuple in HOLIDAYS:
+        removed = False
+        if kv:
+            try:
+                removed = kv.sismember('keka_holidays_removed', date_str)
+            except Exception:
+                pass
+        if not removed:
+            holiday_name = HOLIDAYS[today_tuple]
+
+    if not holiday_name and kv:
+        try:
+            added_name = kv.hget('keka_holidays_added', date_str)
+            if added_name:
+                if isinstance(added_name, bytes):
+                    added_name = added_name.decode('utf-8')
+                holiday_name = added_name
+        except Exception:
+            pass
+
     is_custom_exempt = False
     if not holiday_name and kv:
         try:
-            date_str = f"{today_tuple[0]}-{today_tuple[1]:02d}-{today_tuple[2]:02d}"
             if kv.sismember('keka_exempt_dates', date_str):
                 is_custom_exempt = True
                 holiday_name = "Custom Exempt Day"
         except Exception:
             pass
+
     is_wkend = now_ist.weekday() >= 5
+    is_force_wd = is_force_workday(now_ist)
 
     # Clock-in slot (same RNG as _should_run_action)
     rng_in = _random_mod.Random(today * 10 + 0)
@@ -848,6 +910,7 @@ def get_today_schedule():
         'total_minutes': total_minutes,
         'clock_out_done': clock_out_done,
         'extend_minutes': extend_minutes,
+        'is_force_workday': is_force_wd,
     }
 
 
@@ -913,6 +976,112 @@ def get_exempt_dates():
         return []
     try:
         raw = kv.smembers('keka_exempt_dates')
+        dates = []
+        for d in raw:
+            if isinstance(d, bytes):
+                d = d.decode('utf-8')
+            dates.append(d)
+        return sorted(dates)
+    except Exception:
+        return []
+
+
+def get_all_holidays():
+    """Return merged holiday dict: hardcoded + Redis added - Redis removed.
+    Returns {date_str: {'name': str, 'source': 'default'|'custom'}}."""
+    holidays = {}
+    for (y, m, d), name in HOLIDAYS.items():
+        date_str = f"{y}-{m:02d}-{d:02d}"
+        holidays[date_str] = {'name': name, 'source': 'default'}
+
+    if kv:
+        try:
+            removed = kv.smembers('keka_holidays_removed')
+            for r in removed:
+                if isinstance(r, bytes):
+                    r = r.decode('utf-8')
+                holidays.pop(r, None)
+        except Exception:
+            pass
+        try:
+            added = kv.hgetall('keka_holidays_added')
+            for ds, name in added.items():
+                if isinstance(ds, bytes):
+                    ds = ds.decode('utf-8')
+                if isinstance(name, bytes):
+                    name = name.decode('utf-8')
+                holidays[ds] = {'name': name, 'source': 'custom'}
+        except Exception:
+            pass
+
+    return dict(sorted(holidays.items()))
+
+
+def add_holiday(date_str, name):
+    """Add a holiday. Returns True or error string."""
+    if not kv:
+        return "Redis not available"
+    try:
+        datetime.strptime(date_str, '%Y-%m-%d')
+    except ValueError:
+        return "Invalid date format, use YYYY-MM-DD"
+    if not name or not name.strip():
+        return "Holiday name required"
+    try:
+        kv.srem('keka_holidays_removed', date_str)
+        kv.hset('keka_holidays_added', date_str, name.strip())
+        return True
+    except Exception as e:
+        return f"Error: {e}"
+
+
+def remove_holiday(date_str):
+    """Remove a holiday (hardcoded or custom). Returns True or error string."""
+    if not kv:
+        return "Redis not available"
+    try:
+        parts = date_str.split('-')
+        key = (int(parts[0]), int(parts[1]), int(parts[2]))
+        if key in HOLIDAYS:
+            kv.sadd('keka_holidays_removed', date_str)
+        kv.hdel('keka_holidays_added', date_str)
+        return True
+    except Exception as e:
+        return f"Error: {e}"
+
+
+def add_force_workday(date_str):
+    """Add a force work day. Returns True or error string."""
+    if not kv:
+        return "Redis not available"
+    try:
+        datetime.strptime(date_str, '%Y-%m-%d')
+    except ValueError:
+        return "Invalid date format, use YYYY-MM-DD"
+    try:
+        kv.sadd('keka_force_workdays', date_str)
+        return True
+    except Exception as e:
+        return f"Error: {e}"
+
+
+def remove_force_workday(date_str):
+    """Remove a force work day. Returns True or error string."""
+    if not kv:
+        return "Redis not available"
+    try:
+        kv.srem('keka_force_workdays', date_str)
+        return True
+    except Exception as e:
+        return f"Error: {e}"
+
+
+def get_force_workdays():
+    """Return list of force work days from Redis."""
+    if not kv:
+        return []
+    try:
+        raw = kv.smembers('keka_force_workdays')
         dates = []
         for d in raw:
             if isinstance(d, bytes):
