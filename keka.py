@@ -29,7 +29,7 @@ TOKEN_EXPIRY_BUFFER = int(os.environ.get('TOKEN_EXPIRY_BUFFER', '300'))
 TOKEN_REFRESH_INTERVAL = int(os.environ.get('TOKEN_REFRESH_INTERVAL', '10800'))  # 3 hours in seconds
 
 HOLIDAYS = {
-    (2026, 8, 4): "Janmashtami",
+    (2026, 9, 4): "Janmashtami",
     (2026, 9, 14): "Ganesh Chaturthi",
     (2026, 10, 2): "Mahatma Gandhi Jayanti",
     (2026, 10, 20): "Dussehra",
