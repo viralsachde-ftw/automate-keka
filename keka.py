@@ -29,14 +29,13 @@ TOKEN_EXPIRY_BUFFER = int(os.environ.get('TOKEN_EXPIRY_BUFFER', '300'))
 TOKEN_REFRESH_INTERVAL = int(os.environ.get('TOKEN_REFRESH_INTERVAL', '10800'))  # 3 hours in seconds
 
 HOLIDAYS = {
-    (2027, 8, 25): "Janmashtami",
-    (2027, 9, 14): "Ganesh Chaturthi",
-    (2027, 9, 15): "Samvatsari",
-    (2027, 10, 2): "Mahatma Gandhi Jayanti",
-    (2027, 10, 20): "Dussehra",
-    (2027, 11, 8): "Diwali / Deepavali",
-    (2027, 11, 10): "Vikram Samvat New Year",
-    (2027, 11, 11): "Bhai Dooj",
+    (2026, 8, 4): "Janmashtami",
+    (2026, 9, 14): "Ganesh Chaturthi",
+    (2026, 10, 2): "Mahatma Gandhi Jayanti",
+    (2026, 10, 20): "Dussehra",
+    (2026, 11, 8): "Diwali / Deepavali",
+    (2026, 11, 10): "Vikram Samvat New Year",
+    (2026, 11, 11): "Bhai Dooj",
 }
 
 # Configure logging (after LOG_LEVEL is defined)
