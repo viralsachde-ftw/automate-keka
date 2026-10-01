@@ -1300,7 +1300,7 @@ def _apply_floater_inner(date_str):
     result = keka.apply_floater_leave_api(target, date_str, note="Floater Holiday")
     if result is True:
         try:
-            kv.set(redis_key, '1', ex=86400 * 30)
+            kv.set(redis_key, '1', ex=86400 * 180)
         except Exception:
             pass
         return True
@@ -1322,6 +1322,13 @@ def run_floater_auto():
         if not is_floater_auto_enabled(date_str):
             logging.info(f"Floater auto-apply disabled for {date_str}. Skipping.")
             continue
+        if kv:
+            try:
+                if kv.get(f"keka_floater_applied_{date_str.replace('-', '')}"):
+                    logging.info(f"Floater {date_str}: already applied. Skipping.")
+                    continue
+            except Exception:
+                pass
         attempted = True
         logging.info(f"Floater auto-apply: {name} {date_str} ({days_until}d away)")
         result = apply_floater(date_str)
