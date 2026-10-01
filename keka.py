@@ -38,6 +38,10 @@ HOLIDAYS = {
     (2026, 11, 11): "Bhai Dooj",
 }
 
+FLOATER_HOLIDAYS = {
+    (2026, 10, 20): "Dussehra",
+}
+
 # Configure logging (after LOG_LEVEL is defined)
 log_level_map = {
     'DEBUG': logging.DEBUG,
@@ -502,6 +506,81 @@ class KekaAttendance:
         if clock_type is None:
             clock_type = os.environ.get('KEKA_CLOCK_TYPE', 'web').lower()
         return self.clock_action("out", clock_type)
+
+    def get_floater_holidays_api(self):
+        """Fetch available floater holidays from Keka API."""
+        if self.should_refresh_token():
+            self.refresh_access_token()
+        headers = {
+            'Accept': 'application/json',
+            'Authorization': f'Bearer {self.access_token}',
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:143.0) Gecko/20100101 Firefox/143.0',
+            'X-Requested-With': 'XMLHttpRequest',
+        }
+        endpoints = [
+            f"{self.base_url}/k/hiro/api/mytime/leave/floaterholidays",
+            f"{self.base_url}/k/hiro/api/mytime/leave/leavetypes",
+        ]
+        for url in endpoints:
+            for attempt in range(2):
+                try:
+                    resp = requests.get(url, headers=headers)
+                    if resp.status_code in (401, 403) and attempt == 0:
+                        self.refresh_access_token()
+                        headers['Authorization'] = f'Bearer {self.access_token}'
+                        continue
+                    if resp.ok:
+                        logging.info(f"Floater API success from {url}")
+                        return resp.json()
+                    logging.warning(f"Floater API {url}: {resp.status_code} {resp.text[:200]}")
+                except Exception as e:
+                    logging.warning(f"Floater API {url}: {e}")
+                break
+        return None
+
+    def apply_floater_leave_api(self, holiday_data, from_date, note=""):
+        """Submit floater leave request to Keka API."""
+        if self.should_refresh_token():
+            self.refresh_access_token()
+        headers = {
+            'Accept': 'application/json, text/plain, */*',
+            'Authorization': f'Bearer {self.access_token}',
+            'Content-Type': 'application/json; charset=utf-8',
+            'Origin': self.base_url,
+            'Referer': f'{self.base_url}/',
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:143.0) Gecko/20100101 Firefox/143.0',
+            'X-Requested-With': 'XMLHttpRequest',
+        }
+        holiday_id = holiday_data.get('id') or holiday_data.get('holidayId') or holiday_data.get('identifier')
+        payload = {
+            "holidayId": holiday_id,
+            "from": f"{from_date}T00:00:00",
+            "to": f"{from_date}T00:00:00",
+            "note": note or "Floater Holiday",
+        }
+        endpoints = [
+            f"{self.base_url}/k/hiro/api/mytime/leave/floaterholidayrequests",
+            f"{self.base_url}/k/hiro/api/mytime/leave/leaverequests",
+        ]
+        last_error = ""
+        for url in endpoints:
+            for attempt in range(2):
+                try:
+                    resp = requests.post(url, headers=headers, json=payload)
+                    if resp.status_code in (401, 403) and attempt == 0:
+                        self.refresh_access_token()
+                        headers['Authorization'] = f'Bearer {self.access_token}'
+                        continue
+                    if resp.ok:
+                        logging.info(f"Floater leave applied via {url}")
+                        return True
+                    last_error = f"{resp.status_code}: {resp.text[:200]}"
+                    logging.warning(f"Apply floater {url}: {last_error}")
+                except Exception as e:
+                    last_error = str(e)
+                    logging.warning(f"Apply floater {url}: {e}")
+                break
+        return last_error
 
 # --- Scheduler / Run Logic ---
 
@@ -1089,6 +1168,83 @@ def get_force_workdays():
         return sorted(dates)
     except Exception:
         return []
+
+
+def get_pending_floaters():
+    """Get upcoming floater holidays that need leave application."""
+    now_ist = datetime.now(IST)
+    today_date = now_ist.date()
+    pending = []
+    for (y, m, d), name in sorted(FLOATER_HOLIDAYS.items()):
+        from datetime import date as _date_cls
+        hol_date = _date_cls(y, m, d)
+        if hol_date < today_date:
+            continue
+        apply_from = hol_date - timedelta(days=7)
+        can_apply = apply_from <= today_date <= hol_date
+        date_str = f"{y}-{m:02d}-{d:02d}"
+        applied = False
+        if kv:
+            try:
+                val = kv.get(f"keka_floater_applied_{date_str.replace('-', '')}")
+                applied = bool(val)
+            except Exception:
+                pass
+        pending.append({
+            'date': date_str,
+            'name': name,
+            'apply_from': apply_from.isoformat(),
+            'can_apply': can_apply,
+            'applied': applied,
+            'days_until': (hol_date - today_date).days,
+            'days_until_window': max(0, (apply_from - today_date).days),
+        })
+    return pending
+
+
+def apply_floater(date_str):
+    """Apply for floater leave on the given date. Returns True or error string."""
+    if not kv:
+        return "Redis not available"
+    redis_key = f"keka_floater_applied_{date_str.replace('-', '')}"
+    try:
+        if kv.get(redis_key):
+            return "Already applied for this date"
+    except Exception:
+        pass
+
+    keka = KekaAttendance()
+    if not keka.load_tokens():
+        return "No tokens found"
+
+    floaters = keka.get_floater_holidays_api()
+    if not floaters:
+        return "Could not fetch floater holidays from Keka API"
+
+    items = floaters if isinstance(floaters, list) else (
+        floaters.get('data', []) or floaters.get('result', []) or floaters.get('items', [])
+    )
+    if not isinstance(items, list):
+        items = [floaters] if isinstance(floaters, dict) else []
+
+    target = None
+    for f in items:
+        hol_date = str(f.get('date', '') or f.get('holidayDate', '') or f.get('from', ''))
+        if date_str in hol_date:
+            target = f
+            break
+
+    if not target:
+        return f"No matching floater holiday for {date_str}. API returned: {json.dumps(floaters)[:300]}"
+
+    result = keka.apply_floater_leave_api(target, date_str, note="Floater Holiday")
+    if result is True:
+        try:
+            kv.set(redis_key, '1', ex=86400 * 30)
+        except Exception:
+            pass
+        return True
+    return f"Failed to apply: {result}"
 
 
 # --- CLI Setup Logic ---
