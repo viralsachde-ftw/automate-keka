@@ -11,7 +11,8 @@ from keka import (KekaAttendance, run_clock_in, run_clock_out, run_token_refresh
                    get_today_schedule, extend_clock_out, add_exempt_date,
                    remove_exempt_date, get_exempt_dates, get_all_holidays,
                    add_holiday, remove_holiday, add_force_workday,
-                   remove_force_workday, get_force_workdays)
+                   remove_force_workday, get_force_workdays,
+                   get_pending_floaters, apply_floater)
 
 
 def _html_result(ok, message):
@@ -432,6 +433,7 @@ h2{color:#cf222e}p{color:#555}</style></head>
             exempt = get_exempt_dates()
             all_hols = get_all_holidays()
             force_days = get_force_workdays()
+            floaters = get_pending_floaters()
             base = f"{self._base_url()}/api/cron"
             _ps = query.get('secret', [''])[0]
             if _ps:
@@ -528,6 +530,42 @@ h2{color:#cf222e}p{color:#555}</style></head>
             else:
                 schedule_html = '<div class="card off-badge"><div class="icon">&#127796;</div><p>No clock-in/out today</p></div>'
 
+            # Build floater leave card
+            floater_html = ''
+            if floaters:
+                floater_rows = ''
+                for fl in floaters:
+                    fl_date_obj = _date.fromisoformat(fl['date'])
+                    fl_date_fmt = fl_date_obj.strftime('%b %d (%a)')
+                    if fl['applied']:
+                        status_tag = '<span class="fl-tag applied">Applied</span>'
+                        action_btn = ''
+                    elif fl['can_apply']:
+                        status_tag = '<span class="fl-tag ready">Ready</span>'
+                        action_btn = '<button class="fl-apply-btn" onclick="applyFloater(\'' + fl['date'] + '\', this)">Apply Now</button>'
+                    elif fl['days_until_window'] > 0:
+                        status_tag = '<span class="fl-tag waiting">Opens in ' + str(fl['days_until_window']) + 'd</span>'
+                        apply_from_obj = _date.fromisoformat(fl['apply_from'])
+                        action_btn = '<span class="fl-window-date">from ' + apply_from_obj.strftime('%b %d') + '</span>'
+                    else:
+                        status_tag = ''
+                        action_btn = ''
+                    floater_rows += (
+                        '<div class="fl-item">'
+                        '<div class="fl-info"><span class="fl-name">' + fl['name'] + '</span>'
+                        '<span class="fl-date">' + fl_date_fmt + ' &middot; ' + str(fl['days_until']) + ' days away</span></div>'
+                        '<div class="fl-actions">' + status_tag + action_btn + '</div>'
+                        '</div>'
+                    )
+                floater_html = (
+                    '<div class="card floater-card">'
+                    '<h3>&#127796; Floater Leave</h3>'
+                    '<p class="section-desc">Apply at most 7 days before the holiday.</p>'
+                    + floater_rows +
+                    '<div class="msg" id="floaterMsg"></div>'
+                    '</div>'
+                )
+
             html = f"""<!DOCTYPE html>
 <html>
 <head>
@@ -579,6 +617,21 @@ body{{font-family:-apple-system,BlinkMacSystemFont,Segoe UI,Roboto,sans-serif;ba
 .off-badge .icon{{font-size:48px}}
 .off-badge p{{color:#666;margin-top:10px;font-size:15px}}
 .section-desc{{font-size:13px;color:#666;margin-bottom:12px}}
+.floater-card{{border-left:4px solid #ff9800}}
+.fl-item{{display:flex;justify-content:space-between;align-items:center;padding:10px 0;border-bottom:1px solid #f5f5f5}}
+.fl-item:last-child{{border-bottom:none}}
+.fl-info{{display:flex;flex-direction:column;gap:2px}}
+.fl-name{{font-size:15px;font-weight:600}}
+.fl-date{{font-size:12px;color:#888}}
+.fl-actions{{display:flex;align-items:center;gap:8px;flex-shrink:0}}
+.fl-tag{{font-size:11px;padding:3px 10px;border-radius:10px;font-weight:600;white-space:nowrap}}
+.fl-tag.applied{{background:#e8f5e9;color:#2e7d32}}
+.fl-tag.ready{{background:#fff3e0;color:#e65100}}
+.fl-tag.waiting{{background:#e3f2fd;color:#1565c0}}
+.fl-apply-btn{{padding:8px 16px;border:none;border-radius:8px;background:#ff9800;color:#fff;font-weight:600;cursor:pointer;font-size:13px;white-space:nowrap}}
+.fl-apply-btn:hover{{background:#f57c00}}
+.fl-apply-btn:disabled{{opacity:.5;cursor:not-allowed}}
+.fl-window-date{{font-size:11px;color:#999}}
 </style>
 </head>
 <body>
@@ -589,6 +642,8 @@ body{{font-family:-apple-system,BlinkMacSystemFont,Segoe UI,Roboto,sans-serif;ba
 </div>
 
 {schedule_html}
+
+{floater_html}
 
 <div class="card">
   <h3>Holidays</h3>
@@ -696,6 +751,23 @@ function removeForceDay(d){{
     .then(function(){{location.reload();}})
     .catch(function(e){{alert('Error: '+e);}});
 }}
+function applyFloater(d,btn){{
+  var m=document.getElementById('floaterMsg');
+  if(btn)btn.disabled=true;
+  m.textContent='Applying floater leave...';m.style.color='#555';
+  fetch(BASE+SEP+'action=apply-floater&date='+encodeURIComponent(d))
+    .then(function(r){{return r.text();}})
+    .then(function(t){{
+      if(t.indexOf('applied')!==-1||t.indexOf('Applied')!==-1){{
+        m.style.color='#2e7d32';m.textContent='✅ '+t;
+        setTimeout(function(){{location.reload();}},1200);
+      }}else{{
+        m.style.color='#c62828';m.textContent='❌ '+t;
+        if(btn)btn.disabled=false;
+      }}
+    }})
+    .catch(function(e){{m.style.color='#c62828';m.textContent='Error: '+e;if(btn)btn.disabled=false;}});
+}}
 </script>
 <footer style="text-align:center;margin-top:28px;color:#bbb;font-size:12px">Made with &hearts; by Viral</footer>
 </body></html>"""
@@ -762,6 +834,20 @@ function removeForceDay(d){{
             self.send_header('Content-type', 'text/plain')
             self.end_headers()
             self.wfile.write(("Force workday removed" if result is True else str(result)).encode('utf-8'))
+            return
+        elif action == 'apply-floater':
+            date_str = query.get('date', [''])[0]
+            if not date_str:
+                self.send_response(400)
+                self.send_header('Content-type', 'text/plain')
+                self.end_headers()
+                self.wfile.write(b"Missing date parameter")
+                return
+            result = apply_floater(date_str)
+            self.send_response(200)
+            self.send_header('Content-type', 'text/plain')
+            self.end_headers()
+            self.wfile.write(("Floater leave applied!" if result is True else str(result)).encode('utf-8'))
             return
 
         self.send_response(200)
