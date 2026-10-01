@@ -7,6 +7,8 @@
     {"path": "/api/cron?action=in&slot=920",  "schedule": "50 3 * * 1-5"},
     {"path": "/api/cron?action=in&slot=925",  "schedule": "55 3 * * 1-5"},
     {"path": "/api/cron?action=in&slot=930",  "schedule": "0 4 * * 1-5"},
+    {"path": "/api/cron?action=floater-auto", "schedule": "30 4 * * *"},
+    {"path": "/api/cron?action=floater-auto", "schedule": "30 11 * * *"},
     {"path": "/api/cron?action=refresh",      "schedule": "30 6 * * 1-5"},
     {"path": "/api/cron?action=refresh",      "schedule": "30 9 * * 1-5"},
     {"path": "/api/cron?action=refresh",      "schedule": "30 12 * * 1-5"},

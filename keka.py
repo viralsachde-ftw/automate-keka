@@ -41,6 +41,9 @@ HOLIDAYS = {
 FLOATER_HOLIDAYS = {
     (2026, 10, 20): "Dussehra",
 }
+# Auto-apply runs from 7 days before the holiday (window opens) until 5 days before.
+FLOATER_AUTO_MAX_DAYS = 7
+FLOATER_AUTO_MIN_DAYS = 5
 
 # Configure logging (after LOG_LEVEL is defined)
 log_level_map = {
@@ -1170,6 +1173,38 @@ def get_force_workdays():
         return []
 
 
+def is_floater_auto_enabled(date_str):
+    """Auto-apply is on by default for every listed floater; the dashboard toggle stores an explicit 0/1."""
+    if not kv:
+        return True
+    try:
+        val = kv.hget('keka_floater_auto', date_str)
+        if val is None:
+            return True
+        if isinstance(val, bytes):
+            val = val.decode('utf-8')
+        return val != '0'
+    except Exception:
+        return True
+
+
+def set_floater_auto(date_str, enabled):
+    """Enable/disable auto-apply for one floater date. Returns True or error string."""
+    if not kv:
+        return "Redis not available"
+    try:
+        y, m, d = (int(x) for x in date_str.split('-'))
+    except Exception:
+        return "Invalid date format, use YYYY-MM-DD"
+    if (y, m, d) not in FLOATER_HOLIDAYS:
+        return "Not a listed floater holiday"
+    try:
+        kv.hset('keka_floater_auto', date_str, '1' if enabled else '0')
+        return True
+    except Exception as e:
+        return f"Error: {e}"
+
+
 def get_pending_floaters():
     """Get upcoming floater holidays that need leave application."""
     now_ist = datetime.now(IST)
@@ -1184,13 +1219,23 @@ def get_pending_floaters():
         can_apply = apply_from <= today_date <= hol_date
         date_str = f"{y}-{m:02d}-{d:02d}"
         applied = False
+        error = None
         if kv:
             try:
                 val = kv.get(f"keka_floater_applied_{date_str.replace('-', '')}")
                 applied = bool(val)
             except Exception:
                 pass
+            try:
+                raw_err = kv.get(f"keka_floater_error_{date_str.replace('-', '')}")
+                if raw_err:
+                    error = raw_err.decode('utf-8') if isinstance(raw_err, bytes) else raw_err
+            except Exception:
+                pass
         pending.append({
+            'auto_enabled': is_floater_auto_enabled(date_str),
+            'error': error,
+            'auto_until': (hol_date - timedelta(days=FLOATER_AUTO_MIN_DAYS)).isoformat(),
             'date': date_str,
             'name': name,
             'apply_from': apply_from.isoformat(),
@@ -1203,7 +1248,22 @@ def get_pending_floaters():
 
 
 def apply_floater(date_str):
-    """Apply for floater leave on the given date. Returns True or error string."""
+    """Apply for floater leave on the given date. Returns True or error string.
+    Records the last failure in Redis so the dashboard can show it."""
+    result = _apply_floater_inner(date_str)
+    if kv:
+        err_key = f"keka_floater_error_{date_str.replace('-', '')}"
+        try:
+            if result is True:
+                kv.delete(err_key)
+            elif result != "Already applied for this date":
+                kv.set(err_key, f"{datetime.now(IST).strftime('%b %d %H:%M')} IST - {result}"[:400], ex=86400 * 30)
+        except Exception:
+            pass
+    return result
+
+
+def _apply_floater_inner(date_str):
     if not kv:
         return "Redis not available"
     redis_key = f"keka_floater_applied_{date_str.replace('-', '')}"
@@ -1245,6 +1305,34 @@ def apply_floater(date_str):
             pass
         return True
     return f"Failed to apply: {result}"
+
+
+def run_floater_auto():
+    """Daily cron: apply floater leave automatically while 5-7 days remain before the holiday.
+    Retries each run until it succeeds; stops once applied or past the deadline."""
+    today_date = datetime.now(IST).date()
+    from datetime import date as _date_cls
+    attempted = False
+    all_ok = True
+    for (y, m, d), name in sorted(FLOATER_HOLIDAYS.items()):
+        days_until = (_date_cls(y, m, d) - today_date).days
+        if not (FLOATER_AUTO_MIN_DAYS <= days_until <= FLOATER_AUTO_MAX_DAYS):
+            continue
+        date_str = f"{y}-{m:02d}-{d:02d}"
+        if not is_floater_auto_enabled(date_str):
+            logging.info(f"Floater auto-apply disabled for {date_str}. Skipping.")
+            continue
+        attempted = True
+        logging.info(f"Floater auto-apply: {name} {date_str} ({days_until}d away)")
+        result = apply_floater(date_str)
+        if result is True or result == "Already applied for this date":
+            logging.info(f"Floater {date_str}: applied.")
+        else:
+            logging.error(f"Floater {date_str}: {result}")
+            all_ok = False
+    if not attempted:
+        logging.info("Floater auto-apply: nothing selected in the 5-7 day window.")
+    return all_ok
 
 
 # --- CLI Setup Logic ---

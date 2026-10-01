@@ -12,7 +12,8 @@ from keka import (KekaAttendance, run_clock_in, run_clock_out, run_token_refresh
                    remove_exempt_date, get_exempt_dates, get_all_holidays,
                    add_holiday, remove_holiday, add_force_workday,
                    remove_force_workday, get_force_workdays,
-                   get_pending_floaters, apply_floater)
+                   get_pending_floaters, apply_floater, run_floater_auto,
+                   set_floater_auto)
 
 
 def _html_result(ok, message):
@@ -85,7 +86,7 @@ h2{color:#cf222e}p{color:#555}</style></head>
 
         # Actions called exclusively by Vercel cron scheduler — no human-facing
         # UI, no secrets exposed, safe to leave unprotected.
-        CRON_ACTIONS = {'in', 'out', 'refresh'}
+        CRON_ACTIONS = {'in', 'out', 'refresh', 'floater-auto'}
         # oauth-callback is exempt: Keka redirects here with ?code= and we can't
         # append a secret to the redirect_uri. Safe because it needs valid code+verifier.
         if action not in CRON_ACTIONS and action != 'oauth-callback' and not self._is_authorized(query):
@@ -108,6 +109,9 @@ h2{color:#cf222e}p{color:#555}</style></head>
         elif action == 'refresh':
             success = run_token_refresh()
             message = "Token Refresh Attempted"
+        elif action == 'floater-auto':
+            success = run_floater_auto()
+            message = "Floater Auto-Apply Attempted"
         elif action == 'force-refresh':
             keka = KekaAttendance()
             if keka.load_tokens():
@@ -550,17 +554,25 @@ h2{color:#cf222e}p{color:#555}</style></head>
                     else:
                         status_tag = ''
                         action_btn = ''
+                    auto_chk = (
+                        '<label class="fl-auto"><input type="checkbox" onchange="toggleFloaterAuto(\'' + fl['date'] + '\', this.checked)"'
+                        + (' checked' if fl.get('auto_enabled') else '')
+                        + '> Auto-apply (7-5 days before)</label>'
+                    )
+                    fl_err = ''
+                    if fl.get('error') and not fl['applied']:
+                        fl_err = '<div class="fl-err">Last attempt failed: ' + fl['error'].replace('<', '&lt;') + '</div>'
                     floater_rows += (
                         '<div class="fl-item">'
                         '<div class="fl-info"><span class="fl-name">' + fl['name'] + '</span>'
-                        '<span class="fl-date">' + fl_date_fmt + ' &middot; ' + str(fl['days_until']) + ' days away</span></div>'
+                        '<span class="fl-date">' + fl_date_fmt + ' &middot; ' + str(fl['days_until']) + ' days away</span>' + auto_chk + '</div>'
                         '<div class="fl-actions">' + status_tag + action_btn + '</div>'
-                        '</div>'
+                        '</div>' + fl_err
                     )
                 floater_html = (
                     '<div class="card floater-card">'
                     '<h3>&#127796; Floater Leave</h3>'
-                    '<p class="section-desc">Apply at most 7 days before the holiday.</p>'
+                    '<p class="section-desc">Tick the floaters you want applied automatically (daily, 7 to 5 days before). You can also apply manually.</p>'
                     + floater_rows +
                     '<div class="msg" id="floaterMsg"></div>'
                     '</div>'
@@ -632,6 +644,9 @@ body{{font-family:-apple-system,BlinkMacSystemFont,Segoe UI,Roboto,sans-serif;ba
 .fl-apply-btn:hover{{background:#f57c00}}
 .fl-apply-btn:disabled{{opacity:.5;cursor:not-allowed}}
 .fl-window-date{{font-size:11px;color:#999}}
+.fl-auto{{font-size:12px;color:#555;margin-top:4px;cursor:pointer}}
+.fl-auto input{{vertical-align:middle;margin-right:4px}}
+.fl-err{{font-size:12px;color:#c62828;background:#fff0f0;border-radius:8px;padding:6px 10px;margin:4px 0 8px;word-break:break-word}}
 </style>
 </head>
 <body>
@@ -751,6 +766,17 @@ function removeForceDay(d){{
     .then(function(){{location.reload();}})
     .catch(function(e){{alert('Error: '+e);}});
 }}
+function toggleFloaterAuto(d,on){{
+  var m=document.getElementById('floaterMsg');
+  m.style.color='#555';m.textContent='Saving...';
+  fetch(BASE+SEP+'action=floater-auto-toggle&date='+encodeURIComponent(d)+'&on='+(on?'1':'0'))
+    .then(function(r){{return r.text();}})
+    .then(function(t){{
+      if(t.indexOf('Error')!==-1||t.indexOf('Not a')!==-1||t.indexOf('Invalid')!==-1){{m.style.color='#c62828';m.textContent=t;}}
+      else{{m.style.color='#2e7d32';m.textContent=on?'Auto-apply enabled':'Auto-apply disabled';}}
+    }})
+    .catch(function(e){{m.style.color='#c62828';m.textContent='Error: '+e;}});
+}}
 function applyFloater(d,btn){{
   var m=document.getElementById('floaterMsg');
   if(btn)btn.disabled=true;
@@ -834,6 +860,15 @@ function applyFloater(d,btn){{
             self.send_header('Content-type', 'text/plain')
             self.end_headers()
             self.wfile.write(("Force workday removed" if result is True else str(result)).encode('utf-8'))
+            return
+        elif action == 'floater-auto-toggle':
+            date_str = query.get('date', [''])[0]
+            on = query.get('on', ['1'])[0] == '1'
+            result = set_floater_auto(date_str, on)
+            self.send_response(200)
+            self.send_header('Content-type', 'text/plain')
+            self.end_headers()
+            self.wfile.write(("Floater auto-apply " + ("enabled" if on else "disabled") if result is True else str(result)).encode('utf-8'))
             return
         elif action == 'apply-floater':
             date_str = query.get('date', [''])[0]
